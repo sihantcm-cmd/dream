@@ -1,0 +1,6 @@
+{
+  "name": "Oneiros - Surrealist Dream Journal",
+  "description": "Multi-modal dream journal with voice capture, Jungian archetype analysis, surrealist artwork generation in 1K/2K/4K, and interactive symbol chat.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
