@@ -27,12 +27,13 @@ export interface ChatMessage {
   timestamp: string;
 }
 
-export type ImageResolution = '1K' | '2K' | '4K';
+export type ImageResolution = '1K' | '2K' | '4K' | 'native';
 export type AspectRatioOption = '1:1' | '4:3' | '16:9';
 
-export type ChatModelOption = 'gemini-3.1-pro-preview' | 'gemini-3.5-flash' | 'gemini-3.1-flash-lite';
+export type ChatModelOption = string;
 
 export interface DreamEntry {
+  status?: 'draft' | 'complete';
   id: string;
   createdAt: string;
   title: string;

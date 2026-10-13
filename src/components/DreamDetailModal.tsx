@@ -10,12 +10,26 @@ import {
   CornerDownLeft,
 } from 'lucide-react';
 import { DreamEntry, DreamSymbol } from '../types';
+import { interpretDream, generateSurrealistImage, getHealth } from '../services/api';
+import type { BackendHealth } from '../services/api';
+import { resolutionLabel } from '../services/imageOptions';
+
+const pendingKey = (id: string) => `oneiros_pending_generation_${id}`;
+function recoverGeneration(dream: DreamEntry): DreamEntry | null {
+  try {
+    const entry = JSON.parse(sessionStorage.getItem(pendingKey(dream.id)) || 'null');
+    return entry?.id === dream.id && entry?.createdAt === dream.createdAt && entry?.transcript === dream.transcript && entry?.interpretation
+      ? entry : null;
+  } catch { return null; }
+}
 
 interface DreamDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   dream: DreamEntry;
   onOpenChat: (dream: DreamEntry, symbolQuery?: string) => void;
+  onUpdate: (dream: DreamEntry) => Promise<DreamEntry>;
+  onDelete: (id: string) => Promise<void>;
 }
 
 export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
@@ -23,9 +37,87 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
   onClose,
   dream,
   onOpenChat,
+  onUpdate,
+  onDelete,
 }) => {
   const [isClosing, setIsClosing] = useState(false);
   const [isImageZoomed, setIsImageZoomed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(dream.title);
+  const [notes, setNotes] = useState(dream.emotionalNotes || '');
+  const [pendingDream, setPendingDream] = useState<DreamEntry | null>(() => recoverGeneration(dream));
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [health, setHealth] = useState<BackendHealth | null>(null);
+  const canSynthesize = !!pendingDream ||
+    (dream.status === 'draft' ? health?.capabilities.interpret : health?.capabilities.image);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    getHealth().then((status) => { if (active) setHealth(status); }).catch(() => {});
+    return () => { active = false; };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!editing) { setTitle(dream.title); setNotes(dream.emotionalNotes || ''); }
+  }, [dream.title, dream.emotionalNotes, editing]);
+
+  const rememberGeneration = (entry: DreamEntry | null) => {
+    setPendingDream(entry);
+    try {
+      if (entry) sessionStorage.setItem(pendingKey(dream.id), JSON.stringify(entry));
+      else sessionStorage.removeItem(pendingKey(dream.id));
+    } catch { /* Retain the in-memory result if browser storage is full. */ }
+  };
+
+  const saveEdits = async () => {
+    if (!title.trim()) return;
+    setBusy(true); setNotice('');
+    try {
+      const saved = await onUpdate({ ...dream, title: title.trim(), emotionalNotes: notes.trim() });
+      if (pendingDream) rememberGeneration({ ...pendingDream, title: saved.title, emotionalNotes: saved.emotionalNotes, chatHistory: saved.chatHistory });
+      setEditing(false);
+    }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Could not save changes.'); }
+    finally { setBusy(false); }
+  };
+
+  const synthesize = async () => {
+    if (busy || !canSynthesize) return;
+    setBusy(true); setNotice('正在解读梦境…');
+    try {
+      let entry = pendingDream ? { ...pendingDream, chatHistory: dream.chatHistory } : dream;
+      if (entry.status === 'draft') {
+        const interpretation = await interpretDream(entry.transcript, entry.emotionalNotes);
+        entry = { ...entry, status: 'complete', title: interpretation.title, interpretation, imagePrompt: interpretation.surrealistImagePrompt };
+        rememberGeneration(entry);
+      }
+      if (!entry.imageUrl) {
+        // Persist the interpretation even when resuming a previous failed save.
+        entry = await onUpdate(entry);
+        rememberGeneration(entry);
+        if (!health?.capabilities.image) {
+          rememberGeneration(null);
+          setNotice('梦境解读已保存。绘图服务尚未配置，可稍后补充画作。');
+          return;
+        }
+        entry = {
+          ...entry,
+          resolution: health.imageOptions.resolutions.includes(entry.resolution) ? entry.resolution : health.imageOptions.resolutions[0],
+          aspectRatio: health.imageOptions.aspectRatios.includes(entry.aspectRatio) ? entry.aspectRatio : health.imageOptions.aspectRatios[0],
+        };
+        setNotice('正在生成画作；梦境原文与解读已保留…');
+        const result = await generateSurrealistImage(entry.imagePrompt, entry.resolution, entry.aspectRatio);
+        entry = { ...entry, imageUrl: result.imageUrl };
+        rememberGeneration(entry);
+      }
+      await onUpdate(entry);
+      rememberGeneration(null); setNotice('已保存解读与画作。');
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Generation interrupted. Please retry.'); }
+    finally { setBusy(false); }
+  };
 
   // Keyboard shortcut: ESC to trigger animated dissolution
   useEffect(() => {
@@ -43,10 +135,10 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, isImageZoomed]);
+  }, [isOpen, isImageZoomed, busy]);
 
   const handleAnimateClose = () => {
-    if (isClosing) return;
+    if (isClosing || busy) return;
     setIsClosing(true);
     setTimeout(() => {
       onClose();
@@ -55,7 +147,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
   };
 
   const handleTransitionToChat = (symbolQuery?: string) => {
-    if (isClosing) return;
+    if (isClosing || busy) return;
     setIsClosing(true);
     setTimeout(() => {
       onClose();
@@ -97,7 +189,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
               <span aria-hidden="true">·</span>
               <span>{formattedDate}</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono text-[11px] text-[#B45309] font-bold">{dream.resolution || '2K'}</span>
+              <span className="font-mono text-[11px] text-[#B45309] font-bold">{dream.imageUrl ? resolutionLabel(dream.resolution) : 'WRITTEN DREAM'}</span>
             </div>
             <h2 className="font-editorial text-2xl sm:text-4xl font-semibold text-[#1C1917] leading-tight truncate sm:whitespace-normal">
               {dream.title}
@@ -139,18 +231,33 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
 
         {/* Scrollable Exhibition Body */}
         <div className="p-6 sm:p-8 space-y-10 max-h-[76vh] overflow-y-auto">
+          <div className="rounded-lg border border-[#DDD6C8] bg-[#F4EFEA] p-4 space-y-3 text-xs">
+            <div className="flex flex-wrap gap-4 items-center">
+              <span className="mr-auto">{dream.status === 'draft' ? '草稿已保存 · 尚未进行 AI 解读' : '已保存到本机档案'}</span>
+              {(dream.status === 'draft' || !dream.imageUrl || pendingDream) && <button disabled={busy || !canSynthesize} onClick={synthesize} className="underline disabled:opacity-40">{busy ? '处理中…' : dream.status === 'draft' && !health?.capabilities.image ? 'Interpret · 解读梦境' : 'Generate / Retry · 生成或重试'}</button>}
+              <button disabled={busy} onClick={() => setEditing(!editing)} className="underline">Edit · 编辑</button>
+              <button disabled={busy} onClick={() => setConfirmDelete(!confirmDelete)} className="text-red-800 underline">Delete · 删除</button>
+            </div>
+            {confirmDelete && <div className="flex flex-wrap gap-4 items-center text-red-800"><span>删除这条梦境？可先导出备份。</span><button disabled={busy} onClick={async () => { setBusy(true); try { await onDelete(dream.id); } catch (error) { setNotice(error instanceof Error ? error.message : 'Delete failed.'); } finally { setBusy(false); } }} className="font-semibold underline">确认删除</button><button onClick={() => setConfirmDelete(false)}>取消</button></div>}
+            {editing && <div className="space-y-3">
+              <label className="block">Title · 标题<input className="mt-1 block w-full rounded border p-2 bg-white" value={title} maxLength={300} disabled={busy} onChange={(event) => setTitle(event.target.value)} /></label>
+              <label className="block">Waking notes · 醒后感受<input className="mt-1 block w-full rounded border p-2 bg-white" value={notes} maxLength={4000} disabled={busy} onChange={(event) => setNotes(event.target.value)} /></label>
+              <button disabled={busy || !title.trim()} onClick={saveEdits} className="rounded bg-[#1C1917] text-white px-4 py-2 disabled:opacity-40">Save changes · 保存修改</button>
+            </div>}
+            {notice && <p role="status" className="text-[#92400E]">{notice}</p>}
+          </div>
           {/* SECTION 1: SURREALIST ARTWORK GALLERY SHOWCASE */}
           <section className="space-y-4">
             <div className="relative group bg-[#161514] rounded-xl overflow-hidden border border-[#D5CEC2] shadow-md flex items-center justify-center min-h-[360px] max-h-[640px]">
-              <img
+              {dream.imageUrl ? <img
                 src={dream.imageUrl}
                 alt={dream.title}
                 referrerPolicy="no-referrer"
                 className="w-full h-full object-contain max-h-[640px] transition-transform duration-300 group-hover:scale-[1.01]"
-              />
+              /> : <div className="text-[#D6CEBE] text-center space-y-4"><div className="text-5xl">☾</div><p className="font-body-serif">梦境已记录，尚未生成画作。</p></div>}
 
               {/* Artwork Hover Toolbar */}
-              <div className="absolute bottom-4 right-4 flex items-center gap-2 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+              {dream.imageUrl && <div className="absolute bottom-4 right-4 flex items-center gap-2 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                 <button
                   onClick={() => setIsImageZoomed(true)}
                   className="p-2.5 bg-[#FAF8F5]/90 hover:bg-[#FAF8F5] text-[#1C1917] rounded-lg shadow-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer backdrop-blur-xs"
@@ -158,18 +265,18 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
                   <Maximize2 className="w-3.5 h-3.5" />
                   <span>Inspect Detail</span>
                 </button>
-              </div>
+              </div>}
 
               {/* Resolution Tag Indicator */}
               <div className="absolute top-4 left-4 bg-black/65 text-[#FAF8F5] px-3 py-1 rounded text-xs font-mono backdrop-blur-xs border border-white/10">
-                {dream.resolution} · {dream.aspectRatio} · Dalí & Magritte Aesthetic
+                {dream.imageUrl ? `${resolutionLabel(dream.resolution)} · ${dream.aspectRatio} · Dalí & Magritte Aesthetic` : 'Written Dream · 文字档案'}
               </div>
             </div>
 
             {/* Artwork Curatorial Caption */}
             <div className="px-2 text-xs font-body-serif text-[#78716C] italic leading-relaxed flex flex-col sm:flex-row items-start justify-between gap-3">
               <div className="flex-1">
-                Fig. 1 — Surrealist manifestation of unconscious affective tension: "{dream.imagePrompt}"
+                {dream.imageUrl ? `Fig. 1 — ${dream.imagePrompt}` : '原文已保留，可随时生成解读与画作。'}
               </div>
               {dream.audioUrl && (
                 <div className="flex items-center gap-2 shrink-0 not-italic">
@@ -193,7 +300,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
           </section>
 
           {/* SECTION 3: STRUCTURED JUNGIAN PSYCHOLOGICAL INTERPRETATION */}
-          <section className="space-y-8">
+          {dream.status !== 'draft' && <section className="space-y-8">
             <div className="border-b border-[#E7E2DA] pb-3 flex items-center justify-between">
               <div>
                 <div className="text-xs uppercase tracking-widest text-[#78716C] font-cinzel mb-1">
@@ -320,7 +427,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
                 </button>
               </div>
             </div>
-          </section>
+          </section>}
         </div>
 
         {/* Footer Ribbon with Explicit Close Return Button */}
@@ -375,7 +482,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
             className="max-w-[95vw] max-h-[92vh] object-contain rounded-md shadow-2xl"
           />
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white/90 text-xs font-mono bg-black/70 px-4 py-2 rounded-full backdrop-blur-md border border-white/10">
-            {dream.title} · {dream.resolution} Surrealist Artwork
+            {dream.title} · {resolutionLabel(dream.resolution)} Surrealist Artwork
           </div>
         </div>
       )}

@@ -1,105 +1,307 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import path from 'path';
 import dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { GoogleGenAI, Type } from '@google/genai';
+import { createDreamStore } from './server/dreamStore';
+import { parseDream, parseChatHistory, parseInterpretation } from './server/validation';
+import type { DreamEntry } from './src/types';
+import { getAiConfig } from './server/aiConfig';
+import { AiProviderError, deepseekText, dashscopeTranscribe, dashscopeImage } from './server/domesticAi';
 
-dotenv.config();
+const appRoot = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(appRoot, '.env') });
 
+const dataDirectory = path.resolve(appRoot, process.env.DATA_DIR || './data');
+const dreamStore = createDreamStore(dataDirectory);
 const app = express();
-const port = 3000;
+const port = Number(process.env.PORT || 3000);
+const host = process.env.HOST || '127.0.0.1';
+const aiConfig = getAiConfig();
+const { textProvider, mediaProvider, textModel, imageModel, transcriptionModel } = aiConfig;
+const allowedChatModels = new Set(aiConfig.chatModels.map(({ id }) => id));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// Shared Gemini client utility on the server
-const getAiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured in the environment.');
+app.disable('x-powered-by');
+// This personal archive is served on loopback. Reject browser cross-origin writes.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  if (req.path.startsWith('/api')) res.setHeader('Cache-Control', 'no-store');
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.get('Origin');
+    if (req.get('Sec-Fetch-Site') === 'cross-site') return res.status(403).json({ error: 'Cross-origin writes are not allowed.' });
+    if (origin) {
+      try {
+        if (new URL(origin).host !== req.get('host')) return res.status(403).json({ error: 'Cross-origin writes are not allowed.' });
+      } catch { return res.status(403).json({ error: 'Invalid origin.' }); }
+    }
   }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
+  next();
+});
+app.use(express.json({ limit: '50mb' }));
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown, maxLength = 100_000): value is string {
+  return typeof value === 'string' && value.length <= maxLength;
+}
+
+function getAiClient() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    throw new Error('GEMINI_API_KEY is not configured. Add your Gemini API key to .env.');
+  }
+  return new GoogleGenAI({ apiKey, httpOptions: { timeout: 150_000, retryOptions: { attempts: 1 } } });
+}
+
+function sendAiError(res: express.Response, operation: string, error: unknown) {
+  if (error instanceof AiProviderError) {
+    const provider = error.provider === 'deepseek' ? 'DeepSeek' : '阿里云百炼';
+    const keyName = error.provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'DASHSCOPE_API_KEY';
+    const details: Record<string, string> = {
+      AI_NOT_CONFIGURED: `请在本机 .env 填入 ${keyName} 并重启服务。`,
+      AI_CONFIGURATION_INVALID: '请检查 .env 中的模型与北京地域业务空间 ID 配置。',
+      AI_KEY_INVALID: `密钥无效，请检查 .env 中的 ${keyName} 并重启服务。`,
+      AI_QUOTA_EXCEEDED: '余额或配额不足，或请求过于频繁。请在服务商控制台检查后重试。',
+      AI_ACCESS_DENIED: '访问被拒绝，请检查账号的模型权限和密钥所属地域。',
+      AI_MODEL_UNAVAILABLE: '模型不可用，请检查 .env 中的模型名称与访问权限。',
+      AI_CONTENT_BLOCKED: '服务商未接受本次内容，请调整描述后重试。',
+      AI_CONNECTION_FAILED: '连接超时或失败，请检查网络后手动重试；草稿仍可保存。',
+      AI_INVALID_RESPONSE: '返回结果为空、不完整或格式不正确，请稍后重试。',
+      AI_INVALID_AUDIO: '请提供不超过 3 分钟的 PCM WAV 录音，Base64 编码后不超过 10 MB。',
+      AI_RESPONSE_TOO_LARGE: '返回内容超过本机接收上限。',
+      AI_IMAGE_DOWNLOAD_FAILED: '图片已请求生成，但下载失败。请检查网络；再次生成可能另行计费。',
+      PROVIDER_ERROR: '请求失败，请检查模型配置、网络和账户状态。',
+    };
+    console.error(`${error.provider} ${operation} failed: ${error.code} (HTTP ${error.status})`);
+    const status = error.code === 'AI_INVALID_AUDIO' ? 400
+      : ['AI_NOT_CONFIGURED', 'AI_CONFIGURATION_INVALID'].includes(error.code) ? 503 : 502;
+    return res.status(status).json({ error: `${provider}：${details[error.code]}`, code: error.code, provider: error.provider });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const missingKey = message.includes('GEMINI_API_KEY is not configured');
+  const status = isRecord(error) ? Number(error.status || error.code) : 0;
+  const normalized = message.toLowerCase();
+  let code = 'PROVIDER_ERROR';
+  let detail = 'Gemini 请求失败，请检查模型配置、网络连接和账户权限。';
+  if (missingKey) {
+    code = 'AI_NOT_CONFIGURED';
+    detail = 'GEMINI_API_KEY is not configured. 在本机 .env 填入 Gemini API 密钥并重启服务。';
+  } else if (status === 429 || /resource_exhausted|quota exceeded|rate limit/.test(normalized)) {
+    code = 'AI_QUOTA_EXCEEDED';
+    detail = 'Gemini 配额不足或请求过于频繁。请在 Google AI Studio 检查该项目的模型配额与计费状态，稍后重试。';
+  } else if (status === 401 || /api.key.not.valid|api_key_invalid|invalid api key/.test(normalized)) {
+    code = 'AI_KEY_INVALID';
+    detail = 'Gemini 密钥无效。请检查 .env 中的 GEMINI_API_KEY，更新后重启服务。';
+  } else if (status === 403 || /permission_denied/.test(normalized)) {
+    code = 'AI_ACCESS_DENIED';
+    detail = 'Gemini 拒绝访问。请检查密钥的 API 限制、项目/模型权限及所在地区是否受支持。';
+  } else if (status === 404 || /model.*not found|model.*not supported/.test(normalized)) {
+    code = 'AI_MODEL_UNAVAILABLE';
+    detail = '当前 Gemini 模型不可用。请核对 .env 中的模型名称与该项目的模型访问权限。';
+  } else if (/timeout|timed out|fetch failed|econn|enotfound/.test(normalized)) {
+    code = 'AI_CONNECTION_FAILED';
+    detail = '连接 Gemini 超时或失败。请检查本机能否访问 Google Gemini API；梦境草稿仍可保存。';
+  }
+  // Provider errors may contain request data or credentials. Log only a safe category.
+  console.error(`Gemini ${operation} failed: ${code}${Number.isFinite(status) && status ? ` (HTTP ${status})` : ''}`);
+  return res.status(missingKey ? 503 : 502).json({
+    error: detail, code,
   });
-};
+}
 
-// 1. Audio Transcription Endpoint
-app.post('/api/transcribe', async (req, res) => {
+// A lightweight readiness endpoint for local and hosted deployments.
+app.get('/api/health', async (_req, res) => {
   try {
-    const { audioBase64, mimeType } = req.body;
-    if (!audioBase64) {
-      return res.status(400).json({ error: 'Audio data is required' });
-    }
-
-    const ai = getAiClient();
-    const cleanBase64 = audioBase64.includes(',')
-      ? audioBase64.split(',')[1]
-      : audioBase64;
-    const cleanMimeType = mimeType || 'audio/webm';
-
-    try {
-      // Primary: gemini-3.5-transcribe
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: cleanMimeType,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: 'Transcribe this dream voice recording verbatim. Return only the transcribed spoken words without commentary or formatting labels.',
-            },
-          ],
-        },
-      });
-
-      return res.json({ transcript: response.text?.trim() || '' });
-    } catch (transcribeError) {
-      console.warn('gemini-3.5-transcribe error, trying gemini-3.5-flash fallback:', transcribeError);
-      const fallbackResponse = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: cleanMimeType,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: 'Transcribe this spoken dream recording faithfully into text. Return only the transcription.',
-            },
-          ],
-        },
-      });
-      return res.json({ transcript: fallbackResponse.text?.trim() || '' });
-    }
-  } catch (err: any) {
-    console.error('Transcription failed:', err);
-    res.status(500).json({ error: err.message || 'Failed to transcribe audio' });
+    const dreams = await dreamStore.list();
+    res.json({
+      status: 'ok',
+      ...aiConfig,
+      dreamCount: dreams.length,
+      textModel,
+      imageModel,
+      transcriptionModel,
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(500).json({ status: 'error', error: 'Dream archive storage is unavailable.' });
   }
 });
 
-// 2. Structured Jungian Interpretation & Surrealist Prompt Endpoint
-app.post('/api/interpret', async (req, res) => {
+app.get('/api/archive/export', async (_req, res) => {
   try {
-    const { transcript, emotionalNotes } = req.body;
-    if (!transcript || typeof transcript !== 'string') {
-      return res.status(400).json({ error: 'Dream transcript is required' });
+    const dreams = await dreamStore.list();
+    const mimeTypes: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.webm': 'audio/webm', '.ogg': 'audio/ogg', '.mp4': 'audio/mp4', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg', '.wav': 'audio/wav' };
+    const entries = [];
+    let size = 0;
+    for (const dream of dreams) {
+      const entry = { ...dream };
+      for (const field of ['imageUrl', 'audioUrl'] as const) {
+        const url = entry[field];
+        if (!url) continue;
+        const match = url.match(/^\/(media|samples|src\/assets\/images)\/([a-zA-Z0-9_.-]+)$/);
+        if (!match) continue;
+        const root = match[1] === 'media' ? dreamStore.mediaDirectory : path.join(appRoot, 'src/assets/images');
+        const mime = mimeTypes[path.extname(match[2])];
+        if (!mime) throw new Error('Unsupported archive media type.');
+        const bytes = await readFile(path.join(root, match[2]));
+        entry[field] = `data:${mime};base64,${bytes.toString('base64')}`;
+      }
+      size += Buffer.byteLength(JSON.stringify(entry));
+      if (size > 48 * 1024 * 1024) return res.status(413).json({ error: '档案超过 48 MB，请直接备份整个 data 文件夹（包含全部录音和图片）。' });
+      entries.push(entry);
     }
+    res.attachment(`oneiros-backup-${new Date().toISOString().slice(0, 10)}.json`);
+    res.json({ version: 1, exportedAt: new Date().toISOString(), dreams: entries });
+  } catch { res.status(500).json({ error: 'Could not export all archive media. Back up the data folder directly.' }); }
+});
 
-    const ai = getAiClient();
+// Persistent archive API. The first browser can move its old localStorage archive to the server.
+app.get('/api/dreams', async (_req, res) => {
+  try {
+    res.json({ dreams: await dreamStore.list() });
+  } catch (error) {
+    console.error('Reading the dream archive failed:', error);
+    res.status(500).json({ error: 'Could not read the dream archive.' });
+  }
+});
 
-    const promptText = `Analyze the following morning dream transcript according to Carl Jung's depth psychology and psychoanalytic archetype theory.
-Also create a prompt for generating a museum-grade surrealist painting representing the dream's core emotional theme in the ethereal style of Salvador Dalí and René Magritte.
+app.get('/api/dreams/:id', async (req, res) => {
+  try {
+    const dream = (await dreamStore.list()).find((entry) => entry.id === req.params.id);
+    if (!dream) return res.status(404).json({ error: 'Dream entry was not found.' });
+    res.json({ dream });
+  } catch { res.status(500).json({ error: 'Could not read the dream archive.' }); }
+});
+
+app.post('/api/dreams/import', async (req, res) => {
+  const entries = req.body?.dreams;
+  if (!Array.isArray(entries) || entries.length > 500) return res.status(400).json({ error: 'Import no more than 500 dreams at a time.' });
+  const dreams = entries.map(parseDream);
+  if (dreams.some((entry) => !entry)) return res.status(400).json({ error: 'The archive contains invalid dream entries. Your original file has not been changed.' });
+  try { res.json(await dreamStore.importDreams(dreams as DreamEntry[])); }
+  catch { res.status(500).json({ error: 'Could not import the archive.' }); }
+});
+
+app.put('/api/dreams/:id', async (req, res) => {
+  const dream = parseDream(req.body);
+  if (!dream || dream.id !== req.params.id) return res.status(400).json({ error: 'Dream entry is invalid or its ID does not match.' });
+  try {
+    const updated = await dreamStore.update(req.params.id, dream);
+    if (!updated) return res.status(404).json({ error: 'Dream entry was not found.' });
+    res.json({ dream: updated });
+  } catch { res.status(500).json({ error: 'Could not update the dream.' }); }
+});
+
+app.delete('/api/dreams/:id', async (req, res) => {
+  try {
+    const removed = await dreamStore.remove(req.params.id);
+    if (!removed) return res.status(404).json({ error: 'Dream entry was not found.' });
+    res.json({ deleted: true });
+  } catch { res.status(500).json({ error: 'Could not delete the dream.' }); }
+});
+
+app.post('/api/dreams/bootstrap', async (req, res) => {
+  const initialDreams = req.body?.dreams;
+  if (!Array.isArray(initialDreams) || initialDreams.length > 500) {
+    return res.status(400).json({ error: 'Provide an archive with no more than 500 dreams.' });
+  }
+
+  const dreams = initialDreams.map(parseDream);
+  if (dreams.some((dream) => dream === null)) {
+    return res.status(400).json({ error: 'The archive contains a dream with invalid fields.' });
+  }
+
+  try {
+    const result = await dreamStore.bootstrap(dreams as DreamEntry[]);
+    res.status(result.imported ? 201 : 200).json(result);
+  } catch (error) {
+    console.error('Importing the dream archive failed:', error);
+    res.status(500).json({ error: 'Could not import the dream archive.' });
+  }
+});
+
+app.post('/api/dreams', async (req, res) => {
+  const dream = parseDream(req.body);
+  if (!dream) return res.status(400).json({ error: 'Dream entry is missing required fields.' });
+
+  try {
+    const savedDream = await dreamStore.create(dream);
+    res.status(201).json({ dream: savedDream });
+  } catch (error) {
+    const status = typeof error === 'object' && error !== null && 'status' in error
+      ? Number(error.status)
+      : 500;
+    if (status === 409) return res.status(409).json({ error: 'This dream has already been saved.' });
+    console.error('Saving a dream failed:', error);
+    res.status(500).json({ error: 'Could not save the dream.' });
+  }
+});
+
+app.patch('/api/dreams/:id/chat', async (req, res) => {
+  const chatHistory = parseChatHistory(req.body?.chatHistory);
+  if (!chatHistory) return res.status(400).json({ error: 'Chat history is invalid or too long.' });
+
+  try {
+    const dream = await dreamStore.updateChatHistory(req.params.id, chatHistory);
+    if (!dream) return res.status(404).json({ error: 'Dream entry was not found.' });
+    res.json({ dream });
+  } catch (error) {
+    console.error('Saving symbol chat history failed:', error);
+    res.status(500).json({ error: 'Could not save the chat history.' });
+  }
+});
+
+// Audio transcription endpoint.
+app.post('/api/transcribe', async (req, res) => {
+  const { audioBase64, mimeType } = req.body ?? {};
+  if (!isString(audioBase64, 28_000_000) || !audioBase64.trim()) {
+    return res.status(400).json({ error: 'Audio data is required.' });
+  }
+  const cleanMime = typeof mimeType === 'string' ? mimeType.split(';')[0].toLowerCase() : 'audio/webm';
+  if (!['audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/m4a'].includes(cleanMime)) {
+    return res.status(400).json({ error: 'Audio MIME type is invalid.' });
+  }
+
+  const cleanBase64 = audioBase64.includes(',') ? audioBase64.split(',').pop()! : audioBase64;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64) || Buffer.from(cleanBase64, 'base64').length > 20 * 1024 * 1024) {
+    return res.status(400).json({ error: 'Provide valid base64 audio up to 20 MB.' });
+  }
+  try {
+    let transcript: string;
+    if (mediaProvider === 'dashscope') {
+      transcript = await dashscopeTranscribe({ model: transcriptionModel, audioBase64: cleanBase64, mimeType: cleanMime });
+    } else {
+      const response = await getAiClient().interactions.create({
+        model: transcriptionModel,
+        input: [{ type: 'audio', mime_type: cleanMime, data: cleanBase64 }],
+        generation_config: { transcription_config: { mode: { type: 'verbatim' } } },
+      });
+      transcript = response.output_text || '';
+    }
+    if (!transcript.trim()) throw new Error('Transcription returned no spoken text.');
+    res.json({ transcript: transcript.trim() });
+  } catch (error) {
+    sendAiError(res, 'transcription', error);
+  }
+});
+
+// Structured Jungian interpretation endpoint.
+app.post('/api/interpret', async (req, res) => {
+  const { transcript, emotionalNotes } = req.body ?? {};
+  if (!isString(transcript, 30_000) || !transcript.trim()) {
+    return res.status(400).json({ error: 'Dream transcript is required (maximum 30,000 characters).' });
+  }
+  if (emotionalNotes !== undefined && !isString(emotionalNotes, 4_000)) {
+    return res.status(400).json({ error: 'Dream notes must be 4,000 characters or fewer.' });
+  }
+
+  const promptText = `Analyze the following morning dream transcript according to Carl Jung's depth psychology and psychoanalytic archetype theory.
+Also create a prompt for generating a museum-grade surrealist painting representing the dream's core emotional theme.
 
 Dream Transcript:
 """
@@ -107,263 +309,227 @@ ${transcript}
 """
 ${emotionalNotes ? `Dreamer's Initial Feeling / Notes: "${emotionalNotes}"` : ''}
 
-Provide a comprehensive, structured psychoanalytic synthesis.`;
+Provide a comprehensive, structured psychoanalytic synthesis. Use the same language as the dream transcript for all analysis fields; write the image prompt in English. Frame interpretations as possibilities for reflection, not diagnoses.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+  try {
+    const systemInstruction = `You are a careful Jungian dream reflection assistant and surrealist art curator.
+Explore possible personal associations alongside archetypal motifs. Do not present symbolic meanings as universal facts, and do not provide medical, psychiatric, or diagnostic advice.`;
+    let responseText: string;
+    if (textProvider === 'deepseek') {
+      responseText = await deepseekText({
+        model: textModel, json: true,
+        messages: [
+          { role: 'system', content: `${systemInstruction}
+Return only a valid JSON object with exactly this structure. All fields are required; archetypes and symbols should include relevant observations. Keep surrealistImagePrompt under 700 English characters.
+{"title":"poetic title","coreTheme":"possible emotional theme","unconsciousTension":"possible tension","dominantMood":"mood","archetypes":[{"name":"name","description":"possible meaning","appearanceInDream":"how it appears"}],"symbols":[{"symbol":"symbol","archetypalMeaning":"possible association","personalReflectionPrompt":"personal reflection question"}],"individuationGuidance":"grounded exercise","surrealistImagePrompt":"surrealist painting prompt in English"}` },
+          { role: 'user', content: promptText },
+        ],
+      });
+    } else {
+    const response = await getAiClient().models.generateContent({
+      model: textModel,
       contents: promptText,
       config: {
-        systemInstruction: `You are an eminent Jungian psychoanalyst and surrealist art historian.
-You interpret dreams through the lens of Carl Jung's analytical psychology: the Personal and Collective Unconscious, the Shadow, Anima/Animus, the Persona, the Self, Archetypal motifs, and the Individuation journey.
-You also devise vivid, museum-grade visual prompts in the ethereal surrealist tradition of Salvador Dalí and René Magritte (metaphysical horizons, juxtaposition of everyday objects, suspended physics, dream lighting, symbolic metamorphosis, rich atmospheric depth, fine oil painting textures).`,
+        systemInstruction,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            title: {
-              type: Type.STRING,
-              description: 'A poetic, evocative title for the dream in curatorial exhibition style',
-            },
-            coreTheme: {
-              type: Type.STRING,
-              description: 'The core unconscious emotional theme and conflict of the dream',
-            },
-            unconsciousTension: {
-              type: Type.STRING,
-              description: 'The psychic friction between the waking ego and repressed unconscious contents',
-            },
-            dominantMood: {
-              type: Type.STRING,
-              description: 'Primary emotional and affective atmosphere (e.g., Luminous Nostalgia, Anxious Threshold, Melancholic Rebirth)',
-            },
+            title: { type: Type.STRING, description: 'A poetic, evocative title for the dream.' },
+            coreTheme: { type: Type.STRING, description: 'A possible central emotional theme and conflict.' },
+            unconsciousTension: { type: Type.STRING, description: 'Possible tension between conscious concerns and the dream imagery.' },
+            dominantMood: { type: Type.STRING, description: 'The primary emotional atmosphere.' },
             archetypes: {
               type: Type.ARRAY,
-              description: '2 to 4 prominent Jungian archetypes detected in the dream narrative',
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  name: {
-                    type: Type.STRING,
-                    description: 'Archetype name (e.g., The Shadow, The Anima, The Animus, The Persona, The Threshold Guardian, The Wise Old Guide, The Trickster, The Self)',
-                  },
-                  description: {
-                    type: Type.STRING,
-                    description: 'Psychological significance and function of this archetype in depth psychology',
-                  },
-                  appearanceInDream: {
-                    type: Type.STRING,
-                    description: 'How this archetype specifically manifested or operated in the dream scenario',
-                  },
+                  name: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  appearanceInDream: { type: Type.STRING },
                 },
                 required: ['name', 'description', 'appearanceInDream'],
               },
             },
             symbols: {
               type: Type.ARRAY,
-              description: '3 to 5 notable symbols from the dream',
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  symbol: {
-                    type: Type.STRING,
-                    description: 'The specific object, creature, action, or environment',
-                  },
-                  archetypalMeaning: {
-                    type: Type.STRING,
-                    description: 'Universal and mythological depth meaning of this symbol',
-                  },
-                  personalReflectionPrompt: {
-                    type: Type.STRING,
-                    description: 'A contemplative question for the dreamer to explore in waking life',
-                  },
+                  symbol: { type: Type.STRING },
+                  archetypalMeaning: { type: Type.STRING },
+                  personalReflectionPrompt: { type: Type.STRING },
                 },
                 required: ['symbol', 'archetypalMeaning', 'personalReflectionPrompt'],
               },
             },
-            individuationGuidance: {
-              type: Type.STRING,
-              description: 'Practical active imagination advice and waking-life integration exercise for individuation',
-            },
-            surrealistImagePrompt: {
-              type: Type.STRING,
-              description: 'Detailed prompt for an ethereal surrealist oil painting inspired by Salvador Dalí and René Magritte, representing the core emotional theme with symbolic objects, vast metaphysical horizons, and uncanny dream lighting.',
-            },
+            individuationGuidance: { type: Type.STRING, description: 'A grounded active imagination or waking-life reflection exercise.' },
+            surrealistImagePrompt: { type: Type.STRING, description: 'A detailed surrealist oil painting prompt representing the dream.' },
           },
           required: [
-            'title',
-            'coreTheme',
-            'unconsciousTension',
-            'dominantMood',
-            'archetypes',
-            'symbols',
-            'individuationGuidance',
-            'surrealistImagePrompt',
+            'title', 'coreTheme', 'unconsciousTension', 'dominantMood',
+            'archetypes', 'symbols', 'individuationGuidance', 'surrealistImagePrompt',
           ],
         },
       },
     });
+    responseText = response.text || '{}';
+    }
 
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json(parsed);
-  } catch (err: any) {
-    console.error('Interpretation failed:', err);
-    res.status(500).json({ error: err.message || 'Failed to interpret dream' });
+    const interpretation = parseInterpretation(JSON.parse(responseText));
+    // Archive drafts allow empty fields; generated analyses must contain usable text.
+    if (!interpretation || [
+      interpretation.title, interpretation.coreTheme, interpretation.unconsciousTension,
+      interpretation.dominantMood, interpretation.individuationGuidance, interpretation.surrealistImagePrompt,
+      ...interpretation.archetypes.flatMap(({ name, description, appearanceInDream }) => [name, description, appearanceInDream]),
+      ...interpretation.symbols.flatMap(({ symbol, archetypalMeaning, personalReflectionPrompt }) => [symbol, archetypalMeaning, personalReflectionPrompt]),
+    ].some((field) => !field.trim())) {
+      return res.status(502).json({ error: 'AI returned an incomplete interpretation. Your draft is still available; please retry.' });
+    }
+    res.json(interpretation);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      console.error('AI returned invalid JSON for dream interpretation.');
+      return res.status(502).json({ error: 'AI returned an unreadable interpretation. Please try again.' });
+    }
+    sendAiError(res, 'interpretation', error);
   }
 });
 
-// 3. Surrealist Image Generation Endpoint
-// Uses gemini-3-pro-image-preview with user-specified image resolution (1K, 2K, 4K)
+// Generate artwork and save it on the server so it remains available after a restart.
 app.post('/api/generate-image', async (req, res) => {
-  try {
-    const { prompt, imageSize = '1K', aspectRatio = '1:1' } = req.body;
-    if (!prompt) {
-      return res.status(400).json({ error: 'Image prompt is required' });
-    }
-
-    const validSizes = ['1K', '2K', '4K'];
-    const selectedSize = validSizes.includes(imageSize) ? imageSize : '1K';
-    const validAspectRatios = ['1:1', '4:3', '16:9', '3:4', '9:16'];
-    const selectedRatio = validAspectRatios.includes(aspectRatio) ? aspectRatio : '1:1';
-
-    const ai = getAiClient();
-
-    // Augment prompt to ensure ethereal classic surrealism inspired by Dali & Magritte
-    const styledPrompt = `${prompt}. Ethereal classic surrealism masterpiece in the tradition of Salvador Dalí and René Magritte. Metaphysical vast horizon, pristine dream lighting, exquisite oil painting texture, symbolic juxtaposition, uncanny poetry, sublime composition, museum quality exhibition art.`;
-
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-image-preview',
-        contents: {
-          parts: [{ text: styledPrompt }],
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: selectedRatio,
-            imageSize: selectedSize,
-          },
-        },
-      });
-
-      let imageUrl: string | null = null;
-      if (response.candidates?.[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData) {
-            imageUrl = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-            break;
-          }
-        }
-      }
-
-      if (!imageUrl) {
-        throw new Error('No image was returned from gemini-3-pro-image-preview');
-      }
-
-      return res.json({ imageUrl, imageSize: selectedSize, aspectRatio: selectedRatio });
-    } catch (primaryErr: any) {
-      console.warn('gemini-3-pro-image-preview failed, attempting fallback to gemini-3.1-flash-lite-image:', primaryErr);
-      const fallbackResponse = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite-image',
-        contents: {
-          parts: [{ text: styledPrompt }],
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: selectedRatio,
-          },
-        },
-      });
-
-      let fallbackImageUrl: string | null = null;
-      if (fallbackResponse.candidates?.[0]?.content?.parts) {
-        for (const part of fallbackResponse.candidates[0].content.parts) {
-          if (part.inlineData) {
-            fallbackImageUrl = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-            break;
-          }
-        }
-      }
-
-      if (!fallbackImageUrl) {
-        throw primaryErr;
-      }
-
-      return res.json({ imageUrl: fallbackImageUrl, imageSize: '1K (Fallback)', aspectRatio: selectedRatio });
-    }
-  } catch (err: any) {
-    console.error('Image generation failed:', err);
-    res.status(500).json({ error: err.message || 'Failed to generate surrealist artwork' });
+  const { prompt, imageSize = aiConfig.imageOptions.resolutions[0], aspectRatio = '1:1' } = req.body ?? {};
+  if (!isString(prompt, 20_000) || !prompt.trim()) {
+    return res.status(400).json({ error: 'Image prompt is required (maximum 20,000 characters).' });
   }
-});
+  if (!aiConfig.imageOptions.resolutions.includes(imageSize) || !aiConfig.imageOptions.aspectRatios.includes(aspectRatio)) {
+    return res.status(400).json({ error: 'Unsupported image size or aspect ratio.' });
+  }
+  const selectedSize = imageSize;
+  const selectedRatio = aspectRatio;
+  const styledPrompt = `${prompt}. Museum-quality classic surrealist oil painting, metaphysical horizon, dream lighting, symbolic juxtaposition, uncanny poetry, and atmospheric depth.`;
 
-// 4. Multi-Turn Symbol Inquiry Chat Endpoint
-// Supports:
-// - gemini-3.1-pro-preview (complex tasks)
-// - gemini-3.5-flash (general tasks, default)
-// - gemini-3.1-flash-lite (fast tasks)
-app.post('/api/chat-symbol', async (req, res) => {
   try {
-    const { messages, dreamContext, modelName = 'gemini-3.5-flash' } = req.body;
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'Messages array is required' });
+    if (mediaProvider === 'dashscope') {
+      const image = await dashscopeImage({ model: imageModel, prompt: styledPrompt, aspectRatio: selectedRatio });
+      const imageUrl = await dreamStore.saveGeneratedImage(image.base64, image.mimeType);
+      return res.json({ imageUrl, imageSize: selectedSize, aspectRatio: selectedRatio, width: image.width, height: image.height });
     }
-
     const ai = getAiClient();
-
-    const allowedModels = ['gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
-    const chosenModel = allowedModels.includes(modelName) ? modelName : 'gemini-3.5-flash';
-
-    const systemInstruction = `You are a distinguished Jungian psychoanalyst and depth psychologist assisting a dreamer with active imagination and symbolic exploration.
-You are investigating a specific dream entry from the dreamer's journal:
-- Title: "${dreamContext?.title || 'Recorded Dream'}"
-- Dream Transcript: "${dreamContext?.transcript || ''}"
-- Core Emotional Theme: "${dreamContext?.coreTheme || ''}"
-- Unconscious Tension: "${dreamContext?.unconsciousTension || ''}"
-- Detected Archetypes: ${JSON.stringify(dreamContext?.archetypes || [])}
-- Detected Symbols: ${JSON.stringify(dreamContext?.symbols || [])}
-
-Your Role and Guidelines:
-1. Ground every answer in Carl Jung's analytical psychology (the Shadow, Anima/Animus, archetypal motifs, mythic parallels, personal vs collective unconscious, and Active Imagination).
-2. Deeply explore the specific symbol, character, or sensation the user asks about, examining why their unconscious selected this image.
-3. Be intellectually rigorous, warm, curatorial, and reflective.
-4. Conclude your responses with a thought-provoking inquiry or a short active imagination prompt that invites the dreamer to dialogue directly with the symbol.
-5. Do not offer medical, psychiatric, or diagnostic advice; frame all observations as symbolic psychological inquiry.`;
-
-    // Map conversation history to Gemini contents format
-    const contents = messages.map((m: { role: string; content: string }) => ({
-      role: m.role === 'model' || m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }));
-
-    const response = await ai.models.generateContent({
-      model: chosenModel,
-      contents,
-      config: {
-        systemInstruction,
+    const interaction = await ai.interactions.create({
+      model: imageModel,
+      input: styledPrompt,
+      response_format: {
+        type: 'image',
+        aspect_ratio: selectedRatio,
+        image_size: selectedSize,
       },
     });
+    const image = interaction.output_image;
+    if (!image?.data) throw new Error('The image model returned no image.');
 
-    const reply = response.text || '';
-    return res.json({ reply, modelUsed: chosenModel });
-  } catch (err: any) {
-    console.error('Symbol chat failed:', err);
-    res.status(500).json({ error: err.message || 'Failed to generate psychoanalytic reply' });
+    const mimeType = image.mime_type || 'image/png';
+    const imageUrl = await dreamStore.saveGeneratedImage(image.data, mimeType);
+    res.json({ imageUrl, imageSize: selectedSize, aspectRatio: selectedRatio });
+  } catch (error) {
+    sendAiError(res, 'image generation', error);
   }
 });
 
-// Vite middleware in dev or static files in production
+// Multi-turn dream-symbol dialogue.
+app.post('/api/chat-symbol', async (req, res) => {
+  const { messages, dreamContext, modelName } = req.body ?? {};
+  if (!Array.isArray(messages) || messages.length === 0 || messages.length > 100) {
+    return res.status(400).json({ error: 'Provide between 1 and 100 chat messages.' });
+  }
+  if (!messages.every((message) =>
+    isRecord(message) &&
+    ['user', 'model', 'assistant'].includes(String(message.role)) &&
+    isString(message.content, message.role === 'user' ? 8_000 : 20_000)
+  )) return res.status(400).json({ error: 'A chat message is invalid.' });
+
+  const chosenModel = typeof modelName === 'string' && allowedChatModels.has(modelName)
+    ? modelName
+    : textModel;
+  const context = isRecord(dreamContext) ? dreamContext : {};
+  const systemInstruction = `You are a thoughtful Jungian dream reflection assistant.
+Explore the user's associations and the dream's imagery as possibilities, not diagnoses. Do not offer medical, psychiatric, or diagnostic advice. Respond in the user's language. Keep the final answer under 8,000 characters. End with a question or short active imagination prompt.
+
+Dream entry:
+- Title: ${String(context.title || 'Recorded Dream').slice(0, 300)}
+- Transcript: ${String(context.transcript || '').slice(0, 12_000)}
+- Core theme: ${String(context.coreTheme || '').slice(0, 2_000)}
+- Unconscious tension: ${String(context.unconsciousTension || '').slice(0, 2_000)}
+- Archetypes: ${JSON.stringify(context.archetypes || []).slice(0, 4_000)}
+- Symbols: ${JSON.stringify(context.symbols || []).slice(0, 4_000)}`;
+
+  try {
+    if (textProvider === 'deepseek') {
+      const reply = await deepseekText({
+        model: chosenModel,
+        messages: [{ role: 'system', content: systemInstruction }, ...messages.map((message: { role: string; content: string }) => ({
+          role: message.role === 'user' ? 'user' as const : 'assistant' as const, content: message.content,
+        }))],
+      });
+      return res.json({ reply, modelUsed: chosenModel });
+    }
+    const ai = getAiClient();
+    const response = await ai.models.generateContent({
+      model: chosenModel,
+      contents: messages.map((message: { role: string; content: string }) => ({
+        role: message.role === 'model' || message.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: message.content }],
+      })),
+      config: { systemInstruction },
+    });
+    if (!response.text?.trim()) throw new Error('The chat model returned an empty response.');
+    res.json({ reply: response.text.trim(), modelUsed: chosenModel });
+  } catch (error) {
+    sendAiError(res, 'symbol chat', error);
+  }
+});
+
+app.use('/media', express.static(dreamStore.mediaDirectory, {
+  maxAge: '1y',
+  immutable: true,
+  fallthrough: false,
+}));
+
+app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found.' }));
+
+// Keep old development asset URLs readable after switching to a production build.
+app.use('/src/assets/images', express.static(path.join(appRoot, 'src/assets/images')));
+app.use('/samples', express.static(path.join(appRoot, 'src/assets/images')));
+
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static('dist'));
-  app.get('*', (_req, res) => {
-    res.sendFile(path.resolve('dist', 'index.html'));
-  });
+  const distDirectory = path.join(appRoot, 'dist');
+  app.use(express.static(distDirectory));
+  app.get('*', (_req, res) => res.sendFile(path.join(distDirectory, 'index.html')));
 } else {
   const vite = await createViteServer({
+    root: appRoot,
     server: { middlewareMode: true },
     appType: 'spa',
   });
   app.use(vite.middlewares);
 }
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server listening on http://0.0.0.0:${port}`);
+app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const status = error?.type === 'entity.too.large' ? 413 : error?.status === 404 ? 404 : error instanceof SyntaxError ? 400 : 500;
+  res.status(status).json({ error: status === 413 ? 'Request exceeds the 50 MB upload limit.' : status === 400 ? 'Invalid JSON request body.' : status === 404 ? 'Resource not found.' : 'The server could not complete this request.' });
 });
+
+const server = app.listen(port, host, () => {
+  console.log(`Oneiros is listening on http://localhost:${port}`);
+  console.log(`Dream archive: ${path.join(dataDirectory, 'dreams.json')}`);
+  if (!aiConfig.aiConfigured) {
+    console.warn('Some AI keys are missing. Archive storage works; configure the selected providers in .env.');
+  }
+});
+server.on('error', (error) => {
+  console.error('Could not start Oneiros:', error.message);
+  process.exit(1);
+});
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => server.close(() => process.exit(0)));
+}

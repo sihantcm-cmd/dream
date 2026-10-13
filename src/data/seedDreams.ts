@@ -1,4 +1,6 @@
 import { DreamEntry } from '../types';
+const dreamDesertClocks = '/samples/dream_desert_clocks_1791907918913.jpg';
+const dreamMirrorOcean = '/samples/dream_mirror_ocean_1791907919046.jpg';
 
 export const SEED_DREAMS: DreamEntry[] = [
   {
@@ -11,7 +13,7 @@ export const SEED_DREAMS: DreamEntry[] = [
     emotionalNotes: 'A quiet, reverent sense of grief about passing time, coupled with intense curiosity.',
     resolution: '2K',
     aspectRatio: '1:1',
-    imageUrl: '/src/assets/images/dream_desert_clocks_1791907918913.jpg',
+    imageUrl: dreamDesertClocks,
     imagePrompt:
       'Ethereal classic surrealism painting in the style of Salvador Dalí and René Magritte. A vast quiet metaphysical desert under an indigo twilight sky. In the foreground a translucent brass pocket watch softly draping over a solitary petrified cypress root. An impossible floating marble doorway in the distance framing a star nebula.',
     interpretation: {
@@ -95,7 +97,7 @@ export const SEED_DREAMS: DreamEntry[] = [
     emotionalNotes: 'A mixture of quiet solitude, poetic mystery, and an overwhelming sense of beauty and liberation.',
     resolution: '1K',
     aspectRatio: '1:1',
-    imageUrl: '/src/assets/images/dream_mirror_ocean_1791907919046.jpg',
+    imageUrl: dreamMirrorOcean,
     imagePrompt:
       'Ethereal classic surrealism painting in the style of René Magritte and Salvador Dalí. A calm glassy sea extending to an infinite pale horizon. In the center an ornate open wooden doorframe stands alone on the water framing an emerald sky with a floating moon. Subtle bowler hat silhouette holding a cage of glowing cloud mist.',
     interpretation: {

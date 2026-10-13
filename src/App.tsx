@@ -21,25 +21,18 @@ import { WakeRecorderModal } from './components/WakeRecorderModal';
 import { ArchetypeCodex } from './components/ArchetypeCodex';
 import { ActiveImaginationGuide } from './components/ActiveImaginationGuide';
 import { MethodologyView } from './components/MethodologyView';
+import { bootstrapDreams, createDream, listDreams, updateDreamChatHistory, importDreams, updateDream, deleteDream, getHealth } from './services/api';
+import type { BackendHealth } from './services/api';
+import { ArchiveTools } from './components/ArchiveTools';
 
 const STORAGE_KEY = 'oneiros_dreams_v1';
 
 export default function App() {
-  // Load dreams from localStorage or fallback to SEED_DREAMS
-  const [dreams, setDreams] = useState<DreamEntry[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to parse saved dreams:', e);
-    }
-    return SEED_DREAMS;
-  });
+  const [dreams, setDreams] = useState<DreamEntry[]>([]);
+  const [isLoadingArchive, setIsLoadingArchive] = useState(true);
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [archiveRevision, setArchiveRevision] = useState(0);
+  const [health, setHealth] = useState<BackendHealth | null>(null);
 
   // Navigation tab: defaults to 'cover' for museum entrance monograph
   const [activeTab, setActiveTab] = useState<NavTab>('cover');
@@ -53,35 +46,90 @@ export default function App() {
   const [selectedDreamForDetail, setSelectedDreamForDetail] = useState<DreamEntry | null>(null);
   const [selectedDreamForChat, setSelectedDreamForChat] = useState<DreamEntry | null>(null);
   const [initialSymbolForChat, setInitialSymbolForChat] = useState<string | undefined>(undefined);
+  const openRecorder = () => { if (!isLoadingArchive) setIsRecordModalOpen(true); };
 
-  // Save dreams to localStorage whenever they change
+  // Load the persistent archive and migrate any archive created by the earlier browser-only version.
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(dreams));
-    } catch (e) {
-      console.warn('Failed to save dreams to storage:', e);
-    }
-  }, [dreams]);
+    let isActive = true;
+
+    const loadArchive = async () => {
+      setIsLoadingArchive(true);
+      try {
+        let archive = await listDreams();
+        let legacy: string | null = null;
+        try { legacy = localStorage.getItem(STORAGE_KEY); } catch { /* Storage can be disabled. */ }
+        if (legacy) {
+          const parsed: unknown = JSON.parse(legacy);
+          if (!Array.isArray(parsed)) throw new Error('The previous browser archive is invalid. It has been preserved for recovery.');
+          const result = await importDreams(parsed as DreamEntry[]);
+          archive = result.dreams;
+          // Retain an original recovery copy, including any entries skipped by ID.
+          try {
+            localStorage.setItem(`${STORAGE_KEY}_backup`, legacy);
+            localStorage.removeItem(STORAGE_KEY);
+          } catch { /* Do not delete the source if its recovery copy could not be saved. */ }
+        }
+        if (archive.length === 0) archive = await bootstrapDreams(SEED_DREAMS);
+
+        if (isActive) {
+          setDreams(archive);
+          setBackendError(null);
+        }
+        const health = await getHealth();
+        if (isActive) setHealth(health);
+      } catch (error) {
+        if (isActive) {
+          setBackendError(error instanceof Error ? error.message : 'The dream archive could not be loaded.');
+        }
+      } finally {
+        if (isActive) setIsLoadingArchive(false);
+      }
+    };
+
+    void loadArchive();
+    return () => { isActive = false; };
+  }, [archiveRevision]);
+
+  const handleDreamUpdated = async (dream: DreamEntry) => {
+    const saved = await updateDream(dream);
+    setDreams((prev) => prev.map((entry) => entry.id === saved.id ? saved : entry));
+    setSelectedDreamForDetail(saved);
+    return saved;
+  };
+
+  const handleDreamDeleted = async (id: string) => {
+    await deleteDream(id);
+    setDreams((prev) => prev.filter((entry) => entry.id !== id));
+    setSelectedDreamForDetail(null);
+  };
 
   // Handle new dream creation
-  const handleDreamCreated = (newDream: DreamEntry) => {
-    setDreams((prev) => [newDream, ...prev]);
-    // Allow WakeRecorderModal to evaporate cleanly before DreamDetailModal emerges
-    setTimeout(() => {
-      setSelectedDreamForDetail(newDream);
-    }, 390);
+  const handleDreamCreated = async (newDream: DreamEntry) => {
+    try {
+      const savedDream = await createDream(newDream);
+      setDreams((prev) => [savedDream, ...prev.filter((dream) => dream.id !== savedDream.id)]);
+      setBackendError(null);
+      // Allow WakeRecorderModal to evaporate cleanly before DreamDetailModal emerges
+      setTimeout(() => {
+        setSelectedDreamForDetail(savedDream);
+      }, 390);
+    } catch (error) {
+      setBackendError(error instanceof Error ? error.message : 'Dream could not be saved.');
+      throw error;
+    }
   };
 
   // Handle updating chat history for a dream
-  const handleUpdateChatHistory = (dreamId: string, newHistory: ChatMessage[]) => {
-    setDreams((prev) =>
-      prev.map((d) => (d.id === dreamId ? { ...d, chatHistory: newHistory } : d))
-    );
-    if (selectedDreamForDetail?.id === dreamId) {
-      setSelectedDreamForDetail((prev) => (prev ? { ...prev, chatHistory: newHistory } : null));
-    }
-    if (selectedDreamForChat?.id === dreamId) {
-      setSelectedDreamForChat((prev) => (prev ? { ...prev, chatHistory: newHistory } : null));
+  const handleUpdateChatHistory = async (dreamId: string, newHistory: ChatMessage[]) => {
+    try {
+      const savedDream = await updateDreamChatHistory(dreamId, newHistory);
+      setDreams((prev) => prev.map((dream) => dream.id === dreamId ? savedDream : dream));
+      if (selectedDreamForDetail?.id === dreamId) setSelectedDreamForDetail(savedDream);
+      if (selectedDreamForChat?.id === dreamId) setSelectedDreamForChat(savedDream);
+      setBackendError(null);
+    } catch (error) {
+      setBackendError(error instanceof Error ? error.message : 'Chat history could not be saved.');
+      throw error;
     }
   };
 
@@ -116,16 +164,25 @@ export default function App() {
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        onOpenRecordModal={() => setIsRecordModalOpen(true)}
+        onOpenRecordModal={openRecorder}
         dreamCount={dreams.length}
       />
 
+      {(backendError || isLoadingArchive) && (
+        <div className={`mx-auto mt-4 w-full max-w-7xl px-6 text-xs ${backendError ? 'text-red-800' : 'text-[#78716C]'}`} role={backendError ? 'alert' : 'status'}>
+          {backendError || 'Opening the saved dream archive…'}
+          {backendError && <button className="ml-3 underline" onClick={() => setArchiveRevision((value) => value + 1)}>Retry / 重试</button>}
+        </div>
+      )}
+
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
+        {health && !health.aiConfigured && <div role="status" className="mb-5 rounded-lg border border-[#DDD6C8] bg-[#F4EFEA] px-4 py-3 text-xs text-[#57534E]">本机档案已连接。解读与对话{health.capabilities.interpret ? '已配置' : '待配置'}，转写与绘图{health.capabilities.transcribe && health.capabilities.image ? '已配置' : '待配置'}。文字与录音均可直接保存。</div>}
+        <ArchiveTools disabled={isLoadingArchive} onImported={(archive) => { setDreams(archive); setBackendError(null); }} />
         {/* TAB 0: MONOGRAPH COVER & ENTRANCE */}
         {activeTab === 'cover' && (
           <JournalCover
             onEnterArchive={() => setActiveTab('catalog')}
-            onOpenRecord={() => setIsRecordModalOpen(true)}
+            onOpenRecord={openRecorder}
             featuredDream={dreams[0]}
             onSelectFeatured={(d) => setSelectedDreamForDetail(d)}
             totalDreams={dreams.length}
@@ -155,7 +212,7 @@ export default function App() {
                 </h1>
                 <p className="font-body-serif text-base text-[#57534E] leading-relaxed max-w-2xl">
                   Capture fleeting morning dreams before waking lucidity dissolves them.
-                  Oneiros transcribes your voice, synthesizes high-resolution surrealist artwork (1K, 2K, 4K) in the lineage of Salvador Dalí and René Magritte, and structures your unconscious motifs through Carl Jung’s depth archetypes.
+                  Oneiros transcribes your voice, creates surrealist artwork in the lineage of Salvador Dalí and René Magritte, and explores your dream motifs through Carl Jung’s depth archetypes.
                 </p>
               </div>
 
@@ -170,14 +227,14 @@ export default function App() {
                       Bedside Wake Station
                     </div>
                     <div className="text-xs text-[#78716C]">
-                      Speak immediately upon waking · Instant Gemini verbatim transcription
+                      Speak immediately upon waking · Voice transcription
                     </div>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
                   <button
-                    onClick={() => setIsRecordModalOpen(true)}
+                    onClick={openRecorder}
                     className="w-full sm:w-auto px-5 py-2.5 bg-[#1C1917] hover:bg-[#2F2B28] text-[#FAF8F5] text-xs font-semibold uppercase tracking-wider rounded-md transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
                   >
                     <Plus className="w-4 h-4 text-[#D6CEBE]" />
@@ -240,7 +297,7 @@ export default function App() {
                 <span>
                   Showing {filteredDreams.length} {filteredDreams.length === 1 ? 'Exhibition' : 'Exhibitions'}
                 </span>
-                <span>Resolution affordances: 1K · 2K · 4K</span>
+                <span>Square · Classical · Horizon compositions</span>
               </div>
 
               {filteredDreams.length === 0 ? (
@@ -339,9 +396,9 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-6 text-[11px] font-mono">
-            <span>Powered by Gemini 3.5 & Gemini 3 Pro</span>
+            <span>{health ? `${health.textProvider === 'deepseek' ? 'DeepSeek' : 'Gemini'} · ${health.mediaProvider === 'dashscope' ? '通义千问' : 'Gemini Media'}` : 'Dreams, symbols & imagination'}</span>
             <span aria-hidden="true">·</span>
-            <span>Local Secure Session</span>
+            <span>Personal Local Archive</span>
           </div>
         </div>
       </footer>
@@ -360,6 +417,8 @@ export default function App() {
           isOpen={!!selectedDreamForDetail}
           onClose={() => setSelectedDreamForDetail(null)}
           dream={selectedDreamForDetail}
+          onUpdate={handleDreamUpdated}
+          onDelete={handleDreamDeleted}
           onOpenChat={(d, sym) => {
             handleOpenChat(d, sym);
           }}

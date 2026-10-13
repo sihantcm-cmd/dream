@@ -31,7 +31,7 @@ export const MethodologyView: React.FC = () => {
             Metaphysical horizons, silent deserts, impossible floating doorframes, melting brass instruments, and daytime skies framing nighttime moons reveal the union of opposites (*coincidentia oppositorum*).
           </p>
           <div className="pt-2 text-[11px] text-[#78716C] font-mono border-t border-[#F0EBE3]">
-            Powered by gemini-3-pro-image-preview with 1K, 2K, and 4K resolution options.
+            Artwork sizes follow the configured image model; choose a square, classical, or horizon composition.
           </div>
         </div>
 
@@ -48,7 +48,7 @@ export const MethodologyView: React.FC = () => {
             Our bedside one-tap voice recorder captures spoken descriptions immediately before hypnopompic fading, preserving raw affective tone, emotional nuances, and fragile sensory fragments.
           </p>
           <div className="pt-2 text-[11px] text-[#78716C] font-mono border-t border-[#F0EBE3]">
-            Transcribed verbatim via Gemini multimodal audio processing.
+            Recordings are transcribed verbatim; the original audio stays with your local journal.
           </div>
         </div>
 
@@ -82,7 +82,7 @@ export const MethodologyView: React.FC = () => {
             The agent maintains conversation history, references specific dream transcripts, and adapts to user performance requirements via selectable model profiles.
           </p>
           <div className="pt-2 text-[11px] text-[#78716C] font-mono border-t border-[#F0EBE3]">
-            Supports gemini-3.1-pro-preview, gemini-3.5-flash, and gemini-3.1-flash-lite.
+            Available dialogue models are loaded from your configured text service.
           </div>
         </div>
       </div>

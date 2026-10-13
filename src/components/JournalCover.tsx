@@ -10,6 +10,8 @@ import {
   Layers,
 } from 'lucide-react';
 import { DreamEntry } from '../types';
+import { resolutionLabel } from '../services/imageOptions';
+import coverImage from '../assets/images/dream_journal_cover_1791909647210.jpg';
 
 interface JournalCoverProps {
   onEnterArchive: () => void;
@@ -26,7 +28,7 @@ export const JournalCover: React.FC<JournalCoverProps> = ({
   onSelectFeatured,
   totalDreams,
 }) => {
-  const coverImagePath = '/src/assets/images/dream_journal_cover_1791909647210.jpg';
+  const coverImagePath = coverImage;
 
   return (
     <div className="space-y-12 animate-dream-in">
@@ -110,7 +112,7 @@ export const JournalCover: React.FC<JournalCoverProps> = ({
             <span>Oil on Gessoed Linen</span>
           </div>
           <div className="flex items-center gap-4">
-            <span>1K · 2K · 4K Master Affordance</span>
+            <span>Square · Classical · Horizon</span>
             <span aria-hidden="true">·</span>
             <span>{totalDreams} Dreams Preserved</span>
           </div>
@@ -136,7 +138,7 @@ export const JournalCover: React.FC<JournalCoverProps> = ({
             </h3>
           </div>
           <p className="text-xs text-[#57534E] font-body-serif leading-relaxed">
-            醒来即录，捕捉未经意识滤镜修改的原始梦境片段。实时音频声波可视化，并通过 Gemini 多模态原生语音转写为文字。
+            醒来即录，捕捉未经意识滤镜修改的原始梦境片段。实时音频声波可视化，并将录音逐字转写为文字。
           </p>
           <div className="pt-2 text-xs font-semibold text-[#1C1917] flex items-center gap-1 group-hover:text-[#B45309] transition-colors">
             <span>立即唤醒录音</span>
@@ -161,7 +163,7 @@ export const JournalCover: React.FC<JournalCoverProps> = ({
             </h3>
           </div>
           <p className="text-xs text-[#57534E] font-body-serif leading-relaxed">
-            提取梦境核心情感张力，以经典超现实主义油画技法（玄秘地平线、悬浮重力、物象并置）生成 1K/2K/4K 典藏画作。
+            提取梦境核心情感张力，以经典超现实主义油画技法（玄秘地平线、悬浮重力、物象并置）生成梦境画作，支持方形、古典与横幅构图。
           </p>
           <div className="pt-2 text-xs font-semibold text-[#1C1917] flex items-center gap-1 group-hover:text-[#B45309] transition-colors">
             <span>浏览梦境油画典藏</span>
@@ -225,13 +227,13 @@ export const JournalCover: React.FC<JournalCoverProps> = ({
             onClick={() => onSelectFeatured(featuredDream)}
             className="w-full md:w-64 h-48 rounded-xl overflow-hidden shadow-md border border-[#D5CEC2] shrink-0 cursor-pointer group relative"
           >
-            <img
+            {featuredDream.imageUrl ? <img
               src={featuredDream.imageUrl}
               alt={featuredDream.title}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-            />
+            /> : <div className="h-full bg-[#1C1917] text-[#D6CEBE] flex items-center justify-center font-body-serif">☾ &nbsp; Written Dream · 文字梦境</div>}
             <div className="absolute bottom-2 right-2 bg-black/60 text-white text-[10px] font-mono px-2 py-0.5 rounded backdrop-blur-xs">
-              {featuredDream.resolution}
+              {featuredDream.imageUrl ? resolutionLabel(featuredDream.resolution) : featuredDream.status === 'draft' ? 'DRAFT' : '文字解读'}
             </div>
           </div>
         </div>

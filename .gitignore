@@ -1,4 +1,5 @@
 node_modules/
+/data/
 build/
 dist/
 coverage/
@@ -6,3 +7,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local account setup and app verification screenshots.
+/bailian-key-setup.jpg
+/oneiros-preview.jpg

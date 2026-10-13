@@ -1,6 +1,7 @@
 import React from 'react';
 import { MessageSquare, Sparkles, Volume2, ArrowRight } from 'lucide-react';
 import { DreamEntry } from '../types';
+import { resolutionLabel } from '../services/imageOptions';
 
 interface DreamCardProps {
   dream: DreamEntry;
@@ -27,16 +28,16 @@ export const DreamCard: React.FC<DreamCardProps> = ({
           onClick={() => onSelect(dream)}
           className="relative aspect-4/3 bg-[#1C1917] overflow-hidden cursor-pointer"
         >
-          <img
+          {dream.imageUrl ? <img
             src={dream.imageUrl}
             alt={dream.title}
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500 ease-out"
-          />
+          /> : <div className="h-full flex flex-col items-center justify-center gap-3 text-[#D6CEBE] font-body-serif"><span className="text-4xl">☾</span><span>Written dream · 文字梦境</span></div>}
 
           {/* Clean Unboxed Overlay Metadata */}
           <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-xs text-[#FAF8F5] text-[10px] font-mono tracking-wider px-2 py-0.5 rounded border border-white/10">
-            {dream.resolution}
+            {dream.status === 'draft' ? 'DRAFT · 待解读' : dream.imageUrl ? resolutionLabel(dream.resolution) : '文字解读'}
           </div>
 
           {dream.audioDurationSeconds && (
@@ -64,7 +65,7 @@ export const DreamCard: React.FC<DreamCardProps> = ({
           </h3>
 
           <p className="text-xs text-[#57534E] font-body-serif leading-relaxed line-clamp-3">
-            {dream.interpretation?.coreTheme || dream.transcript}
+            {dream.status === 'draft' ? dream.transcript : dream.interpretation?.coreTheme || dream.transcript}
           </p>
 
           {/* Detected Archetype Unboxed Labels */}
