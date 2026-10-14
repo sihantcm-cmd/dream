@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Maximize2,
@@ -50,8 +50,15 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
   const [pendingDream, setPendingDream] = useState<DreamEntry | null>(() => recoverGeneration(dream));
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [health, setHealth] = useState<BackendHealth | null>(null);
+  const mounted = useRef(true);
+  const generationAbort = useRef<AbortController | null>(null);
   const canSynthesize = !!pendingDream ||
     (dream.status === 'draft' ? health?.capabilities.interpret : health?.capabilities.image);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; generationAbort.current?.abort(); };
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -65,6 +72,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
   }, [dream.title, dream.emotionalNotes, editing]);
 
   const rememberGeneration = (entry: DreamEntry | null) => {
+    if (!mounted.current) return;
     setPendingDream(entry);
     try {
       if (entry) sessionStorage.setItem(pendingKey(dream.id), JSON.stringify(entry));
@@ -86,17 +94,21 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
 
   const synthesize = async () => {
     if (busy || !canSynthesize) return;
+    const controller = new AbortController();
+    generationAbort.current = controller;
     setBusy(true); setNotice('正在解读梦境…');
     try {
       let entry = pendingDream ? { ...pendingDream, chatHistory: dream.chatHistory } : dream;
       if (entry.status === 'draft') {
-        const interpretation = await interpretDream(entry.transcript, entry.emotionalNotes);
+        const interpretation = await interpretDream(entry.transcript, entry.emotionalNotes, controller.signal);
+        if (!mounted.current) return;
         entry = { ...entry, status: 'complete', title: interpretation.title, interpretation, imagePrompt: interpretation.surrealistImagePrompt };
         rememberGeneration(entry);
       }
       if (!entry.imageUrl) {
         // Persist the interpretation even when resuming a previous failed save.
         entry = await onUpdate(entry);
+        if (!mounted.current) return;
         rememberGeneration(entry);
         if (!health?.capabilities.image) {
           rememberGeneration(null);
@@ -109,14 +121,16 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
           aspectRatio: health.imageOptions.aspectRatios.includes(entry.aspectRatio) ? entry.aspectRatio : health.imageOptions.aspectRatios[0],
         };
         setNotice('正在生成画作；梦境原文与解读已保留…');
-        const result = await generateSurrealistImage(entry.imagePrompt, entry.resolution, entry.aspectRatio);
-        entry = { ...entry, imageUrl: result.imageUrl };
+        const result = await generateSurrealistImage(entry.imagePrompt, entry.resolution, entry.aspectRatio, controller.signal);
+        if (!mounted.current) return;
+        entry = { ...entry, imageUrl: result.imageUrl, imagePath: result.imagePath };
         rememberGeneration(entry);
       }
+      if (!mounted.current) return;
       await onUpdate(entry);
       rememberGeneration(null); setNotice('已保存解读与画作。');
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Generation interrupted. Please retry.'); }
-    finally { setBusy(false); }
+    } catch (error) { if (mounted.current) setNotice(error instanceof Error ? error.message : 'Generation interrupted. Please retry.'); }
+    finally { generationAbort.current = null; if (mounted.current) setBusy(false); }
   };
 
   // Keyboard shortcut: ESC to trigger animated dissolution
@@ -233,7 +247,7 @@ export const DreamDetailModal: React.FC<DreamDetailModalProps> = ({
         <div className="p-6 sm:p-8 space-y-10 max-h-[76vh] overflow-y-auto">
           <div className="rounded-lg border border-[#DDD6C8] bg-[#F4EFEA] p-4 space-y-3 text-xs">
             <div className="flex flex-wrap gap-4 items-center">
-              <span className="mr-auto">{dream.status === 'draft' ? '草稿已保存 · 尚未进行 AI 解读' : '已保存到本机档案'}</span>
+              <span className="mr-auto">{dream.status === 'draft' ? '草稿已保存 · 尚未进行 AI 解读' : '已保存到私人档案'}</span>
               {(dream.status === 'draft' || !dream.imageUrl || pendingDream) && <button disabled={busy || !canSynthesize} onClick={synthesize} className="underline disabled:opacity-40">{busy ? '处理中…' : dream.status === 'draft' && !health?.capabilities.image ? 'Interpret · 解读梦境' : 'Generate / Retry · 生成或重试'}</button>}
               <button disabled={busy} onClick={() => setEditing(!editing)} className="underline">Edit · 编辑</button>
               <button disabled={busy} onClick={() => setConfirmDelete(!confirmDelete)} className="text-red-800 underline">Delete · 删除</button>

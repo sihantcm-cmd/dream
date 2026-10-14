@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Moon,
   Sparkles,
@@ -9,6 +9,8 @@ import {
   ArrowRight,
   Sliders,
   Volume2,
+  Settings,
+  LogOut,
 } from 'lucide-react';
 import { DreamEntry, ChatMessage } from './types';
 import { SEED_DREAMS } from './data/seedDreams';
@@ -24,15 +26,24 @@ import { MethodologyView } from './components/MethodologyView';
 import { bootstrapDreams, createDream, listDreams, updateDreamChatHistory, importDreams, updateDream, deleteDream, getHealth } from './services/api';
 import type { BackendHealth } from './services/api';
 import { ArchiveTools } from './components/ArchiveTools';
+import { CloudGate, type CloudAccess } from './components/CloudGate';
+import { CloudSettings } from './components/CloudSettings';
 
 const STORAGE_KEY = 'oneiros_dreams_v1';
 
 export default function App() {
+  return <CloudGate>{(access) => <DreamApp {...access} />}</CloudGate>;
+}
+
+function DreamApp({ cloud, provider, email, signOut }: CloudAccess) {
   const [dreams, setDreams] = useState<DreamEntry[]>([]);
   const [isLoadingArchive, setIsLoadingArchive] = useState(true);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [archiveRevision, setArchiveRevision] = useState(0);
   const [health, setHealth] = useState<BackendHealth | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const archiveMutation = useRef(0);
 
   // Navigation tab: defaults to 'cover' for museum entrance monograph
   const [activeTab, setActiveTab] = useState<NavTab>('cover');
@@ -53,11 +64,13 @@ export default function App() {
     let isActive = true;
 
     const loadArchive = async () => {
+      const mutationAtStart = archiveMutation.current;
       setIsLoadingArchive(true);
       try {
         let archive = await listDreams();
+        if (!isActive) return;
         let legacy: string | null = null;
-        try { legacy = localStorage.getItem(STORAGE_KEY); } catch { /* Storage can be disabled. */ }
+        try { if (!cloud) legacy = localStorage.getItem(STORAGE_KEY); } catch { /* Storage can be disabled. */ }
         if (legacy) {
           const parsed: unknown = JSON.parse(legacy);
           if (!Array.isArray(parsed)) throw new Error('The previous browser archive is invalid. It has been preserved for recovery.');
@@ -69,11 +82,18 @@ export default function App() {
             localStorage.removeItem(STORAGE_KEY);
           } catch { /* Do not delete the source if its recovery copy could not be saved. */ }
         }
-        if (archive.length === 0) archive = await bootstrapDreams(SEED_DREAMS);
+        if (!cloud && archive.length === 0) archive = await bootstrapDreams(SEED_DREAMS);
 
-        if (isActive) {
+        if (isActive && mutationAtStart === archiveMutation.current) {
           setDreams(archive);
+          setSelectedDreamForDetail((current) => current ? archive.find((entry) => entry.id === current.id) || null : null);
+          setSelectedDreamForChat((current) => current ? archive.find((entry) => entry.id === current.id) || null : null);
           setBackendError(null);
+        } else if (isActive) {
+          // A save completed while this snapshot was in flight. Fetch its fresh
+          // media URLs without replacing the newer local result with old data.
+          setArchiveRevision((value) => value + 1);
+          return;
         }
         const health = await getHealth();
         if (isActive) setHealth(health);
@@ -88,10 +108,20 @@ export default function App() {
 
     void loadArchive();
     return () => { isActive = false; };
-  }, [archiveRevision]);
+  }, [archiveRevision, cloud]);
+
+  useEffect(() => {
+    if (!cloud) return;
+    // Private display URLs expire; refresh the archive when returning to this tab.
+    const refresh = () => { if (document.visibilityState === 'visible') setArchiveRevision((value) => value + 1); };
+    document.addEventListener('visibilitychange', refresh);
+    const interval = window.setInterval(refresh, 50 * 60_000);
+    return () => { document.removeEventListener('visibilitychange', refresh); window.clearInterval(interval); };
+  }, [cloud]);
 
   const handleDreamUpdated = async (dream: DreamEntry) => {
     const saved = await updateDream(dream);
+    archiveMutation.current += 1;
     setDreams((prev) => prev.map((entry) => entry.id === saved.id ? saved : entry));
     setSelectedDreamForDetail(saved);
     return saved;
@@ -99,6 +129,7 @@ export default function App() {
 
   const handleDreamDeleted = async (id: string) => {
     await deleteDream(id);
+    archiveMutation.current += 1;
     setDreams((prev) => prev.filter((entry) => entry.id !== id));
     setSelectedDreamForDetail(null);
   };
@@ -107,6 +138,7 @@ export default function App() {
   const handleDreamCreated = async (newDream: DreamEntry) => {
     try {
       const savedDream = await createDream(newDream);
+      archiveMutation.current += 1;
       setDreams((prev) => [savedDream, ...prev.filter((dream) => dream.id !== savedDream.id)]);
       setBackendError(null);
       // Allow WakeRecorderModal to evaporate cleanly before DreamDetailModal emerges
@@ -123,6 +155,7 @@ export default function App() {
   const handleUpdateChatHistory = async (dreamId: string, newHistory: ChatMessage[]) => {
     try {
       const savedDream = await updateDreamChatHistory(dreamId, newHistory);
+      archiveMutation.current += 1;
       setDreams((prev) => prev.map((dream) => dream.id === dreamId ? savedDream : dream));
       if (selectedDreamForDetail?.id === dreamId) setSelectedDreamForDetail(savedDream);
       if (selectedDreamForChat?.id === dreamId) setSelectedDreamForChat(savedDream);
@@ -168,6 +201,12 @@ export default function App() {
         dreamCount={dreams.length}
       />
 
+      {cloud && <div className="max-w-7xl w-full mx-auto px-6 pt-4 flex flex-wrap items-center justify-end gap-4 text-xs text-[#78716C]">
+        <span className="mr-auto truncate max-w-[60vw]">私人云端档案 · {email}</span>
+        <button onClick={() => setSettingsOpen(true)} className="inline-flex items-center gap-1.5 hover:text-[#1C1917]"><Settings size={14} />API 设置</button>
+        <button disabled={loggingOut} onClick={async () => { setLoggingOut(true); try { await signOut(); } catch (error) { setBackendError(error instanceof Error ? error.message : '退出失败，请重试。'); setLoggingOut(false); } }} className="inline-flex items-center gap-1.5 hover:text-[#1C1917] disabled:opacity-40"><LogOut size={14} />{loggingOut ? '正在退出…' : '退出'}</button>
+      </div>}
+
       {(backendError || isLoadingArchive) && (
         <div className={`mx-auto mt-4 w-full max-w-7xl px-6 text-xs ${backendError ? 'text-red-800' : 'text-[#78716C]'}`} role={backendError ? 'alert' : 'status'}>
           {backendError || 'Opening the saved dream archive…'}
@@ -176,8 +215,8 @@ export default function App() {
       )}
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
-        {health && !health.aiConfigured && <div role="status" className="mb-5 rounded-lg border border-[#DDD6C8] bg-[#F4EFEA] px-4 py-3 text-xs text-[#57534E]">本机档案已连接。解读与对话{health.capabilities.interpret ? '已配置' : '待配置'}，转写与绘图{health.capabilities.transcribe && health.capabilities.image ? '已配置' : '待配置'}。文字与录音均可直接保存。</div>}
-        <ArchiveTools disabled={isLoadingArchive} onImported={(archive) => { setDreams(archive); setBackendError(null); }} />
+        {health && !health.aiConfigured && <div role="status" className="mb-5 rounded-lg border border-[#DDD6C8] bg-[#F4EFEA] px-4 py-3 text-xs text-[#57534E]">{cloud ? '私人云端' : '本机'}档案已连接。解读与对话{health.capabilities.interpret ? '已配置' : '待配置'}，转写与绘图{health.capabilities.transcribe && health.capabilities.image ? '已配置' : '待配置'}。文字与录音均可直接保存。{cloud && <button onClick={() => setSettingsOpen(true)} className="ml-3 underline">配置 API 密钥</button>}</div>}
+        <ArchiveTools disabled={isLoadingArchive} onImported={(archive) => { archiveMutation.current += 1; setDreams(archive); setBackendError(null); }} />
         {/* TAB 0: MONOGRAPH COVER & ENTRANCE */}
         {activeTab === 'cover' && (
           <JournalCover
@@ -398,12 +437,13 @@ export default function App() {
           <div className="flex items-center gap-6 text-[11px] font-mono">
             <span>{health ? `${health.textProvider === 'deepseek' ? 'DeepSeek' : 'Gemini'} · ${health.mediaProvider === 'dashscope' ? '通义千问' : 'Gemini Media'}` : 'Dreams, symbols & imagination'}</span>
             <span aria-hidden="true">·</span>
-            <span>Personal Local Archive</span>
+            <span>{cloud ? `${provider === 'aliyun' ? '阿里云' : 'Vercel'} · Personal Cloud Archive` : 'Personal Local Archive'}</span>
           </div>
         </div>
       </footer>
 
       {/* MODALS */}
+      {settingsOpen && <CloudSettings onClose={() => setSettingsOpen(false)} onSaved={() => setArchiveRevision((value) => value + 1)} />}
       {/* 1. Wake Recording Modal */}
       <WakeRecorderModal
         isOpen={isRecordModalOpen}

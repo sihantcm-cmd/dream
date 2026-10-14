@@ -1,0 +1,68 @@
+name: oneiros
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/aliyun/Dockerfile
+    image: oneiros-personal:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      ARCHIVE_MODE: aliyun
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/data
+      TRUST_PROXY: private
+    # Port 3000 is reachable only on the Compose network, never the host.
+    expose:
+      - "3000"
+    volumes:
+      - archive:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Run the Aliyun setup script to configure APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  archive:
+    name: oneiros_archive
+  caddy_data:
+    name: oneiros_caddy_data
+  caddy_config:
+    name: oneiros_caddy_config

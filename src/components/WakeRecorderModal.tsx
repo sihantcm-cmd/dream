@@ -82,7 +82,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
   const lastTranscriptionRef = useRef<{ blob: Blob; text: string } | null>(null);
   const entryIdentityRef = useRef<{ id: string; createdAt: string } | null>(null);
   const generationCacheRef = useRef<{
-    textKey?: string; interpretation?: Interpretation; imageKey?: string; imageUrl?: string;
+    textKey?: string; interpretation?: Interpretation; imageKey?: string; imageUrl?: string; imagePath?: string;
   }>({});
   const isBusy = isSynthesizing || isTranscribing || isPreparingRecording;
 
@@ -396,6 +396,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
         surrealistImagePrompt: '',
       };
       let imageUrl = '';
+      let imagePath: string | undefined;
       if (withAI) {
         const textKey = JSON.stringify([transcript.trim(), emotionalNotes.trim()]);
         const cache = generationCacheRef.current;
@@ -411,8 +412,10 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
             const result = await generateSurrealistImage(interpretation.surrealistImagePrompt, resolution, aspectRatio, controller.signal);
             generationCacheRef.current.imageKey = imageKey;
             generationCacheRef.current.imageUrl = result.imageUrl;
+            generationCacheRef.current.imagePath = result.imagePath;
           }
           imageUrl = generationCacheRef.current.imageUrl!;
+          imagePath = generationCacheRef.current.imagePath;
         }
       }
       setSynthesisStage('Saving your dream & recording...');
@@ -425,7 +428,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
         transcript: transcript.trim(),
         emotionalNotes: emotionalNotes.trim() || undefined,
         audioDurationSeconds: audioBlob ? recordingSeconds : undefined,
-        resolution, aspectRatio, imageUrl,
+        resolution, aspectRatio, imageUrl, imagePath,
         imagePrompt: interpretation.surrealistImagePrompt,
         interpretation, chatHistory: [], audioUrl: savedAudioUrl,
       };
@@ -532,8 +535,8 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
         <fieldset disabled={isSynthesizing || isClosing} className="p-6 sm:p-8 space-y-6 max-h-[68vh] overflow-y-auto min-w-0">
           <div className="text-xs text-[#78716C] leading-relaxed" role="status">
             {health
-              ? `解读${canInterpret ? '已配置' : '待配置'} · 转写${canTranscribe ? '已配置' : '待配置'} · 绘图${canGenerateImage ? '已配置' : '待配置'}。文字与录音均可直接保存到本机。`
-              : '正在获取 AI 配置状态。文字与录音均可直接保存到本机。'}
+              ? `解读${canInterpret ? '已配置' : '待配置'} · 转写${canTranscribe ? '已配置' : '待配置'} · 绘图${canGenerateImage ? '已配置' : '待配置'}。文字与录音均可直接保存到私人档案。`
+              : '正在获取 AI 配置状态。文字与录音均可直接保存到私人档案。'}
             {canInterpret && !canGenerateImage && <span className="block mt-1">可先完成梦境解读，配置绘图服务后再补充画作。</span>}
             <span className="block mt-1">录音上限 20 MB{health?.transcriptionOptions.maxDurationSeconds ? `，每段最长 ${Math.floor(health.transcriptionOptions.maxDurationSeconds / 60)} 分钟` : ''}。文字草稿保留在当前浏览器标签页。</span>
           </div>

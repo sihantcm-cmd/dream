@@ -94,6 +94,8 @@ export function parseDream(value: unknown): DreamEntry | null {
     (value.resolution !== 'native' && value.resolution !== '1K' && value.resolution !== '2K' && value.resolution !== '4K') ||
     (value.aspectRatio !== '1:1' && value.aspectRatio !== '4:3' && value.aspectRatio !== '16:9') ||
     (value.status !== undefined && value.status !== 'draft' && value.status !== 'complete') ||
+    (value.imagePath !== undefined && !isMediaUrl(value.imagePath, 'image')) ||
+    (value.audioPath !== undefined && !isMediaUrl(value.audioPath, 'audio')) ||
     !isMediaUrl(value.imageUrl, 'image') || !isString(value.imagePrompt, 20_000) ||
     (value.audioUrl !== undefined && !isMediaUrl(value.audioUrl, 'audio')) ||
     (value.emotionalNotes !== undefined && !isString(value.emotionalNotes, 4_000)) ||
@@ -106,6 +108,8 @@ export function parseDream(value: unknown): DreamEntry | null {
   return {
     id: value.id, createdAt: value.createdAt, title: value.title, transcript: value.transcript,
     resolution: value.resolution, aspectRatio: value.aspectRatio, status: value.status ?? 'complete',
+    ...(value.imagePath === undefined ? {} : { imagePath: value.imagePath }),
+    ...(value.audioPath === undefined ? {} : { audioPath: value.audioPath }),
     imageUrl: value.imageUrl, imagePrompt: value.imagePrompt, interpretation, chatHistory,
     ...(value.audioUrl === undefined ? {} : { audioUrl: value.audioUrl }),
     ...(value.emotionalNotes === undefined ? {} : { emotionalNotes: value.emotionalNotes }),

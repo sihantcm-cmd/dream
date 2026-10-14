@@ -1,7 +1,7 @@
 {
   "name": "oneiros-dream-archive",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -15,10 +15,12 @@
     "lint": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "verify:ai": "node scripts/verify-ai.mjs",
+    "setup:aliyun": "node scripts/setup-aliyun.mjs",
     "check": "npm run lint && npm run build && npm test"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@supabase/supabase-js": "^2.117.3",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
@@ -27,6 +29,7 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "tsx": "^4.23.15",
     "undici": "7.29.1",
     "vite": "^8.3.0"
   },
@@ -38,7 +41,6 @@
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.28.0",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.21.0",
     "typescript": "^7.0.2"
   }
 }

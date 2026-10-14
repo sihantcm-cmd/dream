@@ -43,8 +43,10 @@ export interface DreamEntry {
   resolution: ImageResolution;
   aspectRatio: AspectRatioOption;
   imageUrl: string;
+  imagePath?: string;
   imagePrompt: string;
   interpretation: Interpretation;
   chatHistory: ChatMessage[];
   audioUrl?: string;
+  audioPath?: string;
 }

@@ -1,5 +1,6 @@
 import { inflateSync } from 'node:zlib';
 import { Agent } from 'undici';
+import { getAiEnvironment, getAiTimeoutMs } from './aiEnvironment';
 
 type Provider = 'deepseek' | 'dashscope';
 
@@ -60,13 +61,13 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function keyFor(provider: Provider) {
   const name = provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'DASHSCOPE_API_KEY';
-  const key = process.env[name]?.trim();
+  const key = getAiEnvironment()[name]?.trim();
   if (!key || key === `MY_${name}`) throw new AiProviderError(provider, 'AI_NOT_CONFIGURED', 503);
   return key;
 }
 
 function dashscopeOrigin() {
-  const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID?.trim();
+  const workspaceId = getAiEnvironment().DASHSCOPE_WORKSPACE_ID?.trim();
   if (!workspaceId) return 'https://dashscope.aliyuncs.com';
   // Only an ID is configurable; credentials can never be directed to an arbitrary URL.
   if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(workspaceId)) {
@@ -114,6 +115,21 @@ async function readLimitedBody(response: Response, limit: number, provider: Prov
   return Buffer.concat(parts, length);
 }
 
+async function readProviderResponse(response: Response, provider: Provider): Promise<Record<string, unknown>> {
+  const bytes = await readLimitedBody(response, MAX_JSON_BYTES, provider);
+  let result: unknown;
+  try { result = JSON.parse(bytes.toString('utf8')); }
+  catch {
+    if (!response.ok) throw providerFailure(provider, response.status, null);
+    throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
+  }
+  if (!response.ok || (record(result) && (result.error || result.code))) {
+    throw providerFailure(provider, response.status, result);
+  }
+  if (!record(result)) throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
+  return result;
+}
+
 async function postJson(
   provider: Provider,
   url: string,
@@ -132,27 +148,79 @@ async function postJson(
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(getAiTimeoutMs(options.timeoutMs ?? REQUEST_TIMEOUT_MS)),
       redirect: 'error',
       dispatcher: providerDispatcher,
     };
     const response = await fetch(url, requestOptions);
-    const bytes = await readLimitedBody(response, MAX_JSON_BYTES, provider);
-    let result: unknown;
-    try { result = JSON.parse(bytes.toString('utf8')); }
-    catch {
-      if (!response.ok) throw providerFailure(provider, response.status, null);
-      throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
-    }
-    if (!response.ok || (record(result) && (result.error || result.code))) {
-      throw providerFailure(provider, response.status, result);
-    }
-    if (!record(result)) throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
-    return result;
+    return await readProviderResponse(response, provider);
   } catch (error) {
     if (error instanceof AiProviderError) throw error;
     throw new AiProviderError(provider, 'AI_CONNECTION_FAILED');
   }
+}
+
+export interface ProviderConnectionResult {
+  provider: Provider;
+  ok: true;
+  tested: string[];
+  model?: string;
+  imageTested: false;
+}
+
+// Explicit settings-page action only. DeepSeek checks access without generating;
+// DashScope submits one second of synthetic silence, which may consume ASR quota.
+// A successful ASR check does not establish access to the image model.
+export async function testProviderConnection(provider: Provider): Promise<ProviderConnectionResult> {
+  if (provider !== 'deepseek' && provider !== 'dashscope') throw new Error('Unsupported AI provider.');
+  if (provider === 'deepseek') {
+    const apiKey = keyFor(provider);
+    try {
+      const options: RequestInit & { dispatcher: Agent } = {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(getAiTimeoutMs(15_000)),
+        redirect: 'error',
+        dispatcher: providerDispatcher,
+      };
+      const result = await readProviderResponse(await fetch('https://api.deepseek.com/models', options), provider);
+      if (!Array.isArray(result.data)) throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
+      return { provider, ok: true, tested: ['authentication', 'models'], imageTested: false };
+    } catch (error) {
+      if (error instanceof AiProviderError) throw error;
+      throw new AiProviderError(provider, 'AI_CONNECTION_FAILED');
+    }
+  }
+
+  // PCM16 mono, 16 kHz, exactly one second. No user recording is used for tests.
+  const wav = Buffer.alloc(44 + 32_000);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write('WAVEfmt ', 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16_000, 24);
+  wav.writeUInt32LE(32_000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(32_000, 40);
+  const model = getAiEnvironment().DASHSCOPE_ASR_MODEL || 'qwen-audio-3.1-asr-flash';
+  const messages = [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${wav.toString('base64')}` } }] }];
+  const native = /^qwen-audio-3\.[01]-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(model);
+  const result = native
+    ? await postJson(provider, `${dashscopeOrigin()}/api/v1/services/aigc/multimodal-generation/generation`, {
+      model, input: { messages }, parameters: { format: 'wav' },
+    }, { headers: { 'X-DashScope-SSE': 'disable' }, timeoutMs: 15_000 })
+    : await postJson(provider, `${dashscopeOrigin()}/compatible-mode/v1/chat/completions`, {
+      model, messages, stream: false, asr_options: { enable_itn: false },
+    }, { timeoutMs: 15_000 });
+  // Silence legitimately has an empty transcript; only require an ASR response.
+  if (native ? !record(result.output) : !Array.isArray(result.choices)) {
+    throw new AiProviderError(provider, 'AI_INVALID_RESPONSE');
+  }
+  return { provider, ok: true, tested: ['authentication', 'transcription'], model, imageTested: false };
 }
 
 function completionText(result: Record<string, unknown>, provider: Provider) {
@@ -166,7 +234,7 @@ function completionText(result: Record<string, unknown>, provider: Provider) {
 }
 
 export function getDeepseekReasoningEffort(): 'none' | 'low' | 'high' | 'max' {
-  const effort = process.env.DEEPSEEK_REASONING_EFFORT || 'max';
+  const effort = getAiEnvironment().DEEPSEEK_REASONING_EFFORT || 'max';
   if (!['none', 'low', 'high', 'max'].includes(effort)) {
     throw new AiProviderError('deepseek', 'AI_CONFIGURATION_INVALID', 503);
   }
@@ -327,7 +395,7 @@ function pngDimensions(bytes: Buffer) {
 
 async function downloadImage(value: string) {
   let url = validatedImageUrl(value);
-  const signal = AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS);
+  const signal = AbortSignal.timeout(getAiTimeoutMs(IMAGE_DOWNLOAD_TIMEOUT_MS));
   try {
     for (let redirect = 0; redirect <= 3; redirect++) {
       // Deliberately no provider Authorization header on storage downloads.

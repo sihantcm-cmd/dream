@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import type { DreamEntry } from '../types';
-import { importDreams } from '../services/api';
+import { exportArchive, importDreams } from '../services/api';
 
 export function ArchiveTools({ disabled, onImported }: { disabled: boolean; onImported: (dreams: DreamEntry[]) => void }) {
   const input = useRef<HTMLInputElement>(null);
@@ -12,14 +12,14 @@ export function ArchiveTools({ disabled, onImported }: { disabled: boolean; onIm
     setBusy(true);
     setNotice('');
     try {
-      if (file.size > 49 * 1024 * 1024) throw new Error('备份文件超过 49 MB，请使用 data 文件夹备份恢复。');
+      if (file.size > 49 * 1024 * 1024) throw new Error('备份文件超过 49 MB，请选择较小的 JSON 备份。');
       const data = JSON.parse(await file.text());
       const entries = Array.isArray(data) ? data : data.dreams;
       if (!Array.isArray(entries)) throw new Error('请选择 Oneiros JSON 档案备份。');
       const result = await importDreams(entries);
       onImported(result.dreams);
       setNotice(`已导入 ${result.imported} 条，保留 ${result.skipped} 条已有记录。`);
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Import failed.'); }
+    } catch (error) { setNotice(`${error instanceof Error ? error.message : '导入失败。'} 已导入的记录会保留，重新导入将按 ID 跳过已有记录。`); }
     finally { setBusy(false); if (input.current) input.current.value = ''; }
   }
 
@@ -27,16 +27,14 @@ export function ArchiveTools({ disabled, onImported }: { disabled: boolean; onIm
     setBusy(true);
     setNotice('');
     try {
-      const response = await fetch('/api/archive/export', { signal: AbortSignal.timeout(60_000) });
-      if (!response.ok) throw new Error((await response.json()).error || 'Export failed.');
-      const blob = await response.blob();
+      const blob = await exportArchive();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
       link.download = `oneiros-backup-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice('已导出档案与本机媒体。请妥善保存备份。');
+      setNotice('已导出档案与媒体。请妥善保存备份。');
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Export failed.'); }
     finally { setBusy(false); }
   }

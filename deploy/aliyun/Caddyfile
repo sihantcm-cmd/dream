@@ -1,0 +1,32 @@
+{
+    # Browsers usually omit SNI when connecting to a literal IP address.
+    default_sni {$APP_DOMAIN}
+}
+
+{$APP_DOMAIN} {
+    # Public IP certificates require Let's Encrypt's short-lived profile.
+    # The same profile also supports domains; Caddy renews automatically.
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        X-Frame-Options DENY
+    }
+    # JSON requests are capped at 4 MB; authenticated raw uploads at 40 MB.
+    request_body {
+        max_size 64MB
+    }
+    reverse_proxy app:3000 {
+        # Replace untrusted incoming forwarding values with the actual peer IP.
+        header_up X-Forwarded-For {remote_host}
+        transport http {
+            response_header_timeout 660s
+        }
+    }
+}
