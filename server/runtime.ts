@@ -1,7 +1,7 @@
 import type express from 'express';
-import type { createDreamStore } from './dreamStore';
-import type { getAiConfig } from './aiConfig';
-import type { DreamEntry } from '../src/types';
+import type { createDreamStore } from './dreamStore.js';
+import type { getAiConfig } from './aiConfig.js';
+import type { DreamEntry } from '../src/types.js';
 
 export type ArchiveStore = Omit<ReturnType<typeof createDreamStore>, 'mediaDirectory'> & {
   mediaDirectory?: string;

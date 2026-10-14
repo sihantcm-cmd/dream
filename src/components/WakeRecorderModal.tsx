@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Mic, Square, Sparkles, X, FileText, RefreshCw, Sliders, AlertCircle, CornerDownLeft,
+  Mic, Square, Sparkles, X, FileText, RefreshCw, Sliders, AlertCircle, CornerDownLeft, Upload,
 } from 'lucide-react';
 import type { ImageResolution, AspectRatioOption, DreamEntry, Interpretation } from '../types';
 import { transcribeAudio, interpretDream, generateSurrealistImage, getHealth } from '../services/api';
@@ -48,6 +48,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioFileName, setAudioFileName] = useState('');
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcript, setTranscript] = useState(initialDraft.transcript);
   const [emotionalNotes, setEmotionalNotes] = useState(initialDraft.emotionalNotes);
@@ -73,6 +74,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
   const timerIntervalRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -233,7 +235,8 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
     setErrorMessage(null);
     try {
       const prepared = await prepareTranscriptionAudio(blob, health.transcriptionOptions);
-      const base64Audio = await audioAsDataUrl(prepared);
+      const dataUrl = await audioAsDataUrl(prepared);
+      const base64Audio = dataUrl.slice(dataUrl.indexOf(',') + 1);
       if (controller.signal.aborted) return;
       const text = (await transcribeAudio(base64Audio, prepared.type.split(';')[0], controller.signal)).trim();
       if (controller.signal.aborted || !mountedRef.current || !openRef.current) return;
@@ -262,6 +265,35 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
         if (mountedRef.current) setIsTranscribing(false);
       }
     }
+  };
+
+  const handleAudioUpload = (file?: File) => {
+    if (!file || operationRef.current || isRecording || isClosing || !mountedRef.current || !openRef.current) return;
+    setErrorMessage(null);
+    if (!file.size || file.size > MAX_AUDIO_BYTES) {
+      setErrorMessage('请选择非空的录音文件，大小须在 20 MB 内。');
+      return;
+    }
+    const extensions: Record<string, string> = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', ogg: 'audio/ogg' };
+    const aliases: Record<string, string> = { 'audio/x-wav': 'audio/wav', 'audio/wave': 'audio/wav', 'audio/mp3': 'audio/mpeg', 'audio/x-m4a': 'audio/mp4' };
+    const suppliedType = file.type.split(';')[0].toLowerCase();
+    const mimeType = aliases[suppliedType] || (Object.values(extensions).includes(suppliedType) ? suppliedType : extensions[file.name.split('.').pop()?.toLowerCase() || '']);
+    if (!mimeType) {
+      setErrorMessage('请选择 WAV、MP3、M4A、WebM 或 OGG 录音。');
+      return;
+    }
+    // Keep the original recording for playback and saving. The same transcription
+    // pipeline as microphone input validates duration and converts it to mono WAV.
+    const blob = file.slice(0, file.size, mimeType);
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    const url = URL.createObjectURL(blob);
+    previewUrlRef.current = url;
+    setAudioBlob(blob);
+    setAudioUrl(url);
+    setAudioFileName(file.name);
+    setRecordingSeconds(0);
+    lastTranscriptionRef.current = null;
+    if (canTranscribe) void handleTranscribe(blob);
   };
 
   const startRecording = async () => {
@@ -337,6 +369,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
       previewUrlRef.current = null;
       setAudioBlob(null);
       setAudioUrl(null);
+      setAudioFileName('');
       setRecordingSeconds(0);
       setIsRecording(true);
       operationRef.current = null;
@@ -367,6 +400,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
     setEmotionalNotes('');
     setAudioBlob(null);
     setAudioUrl(null);
+    setAudioFileName('');
     setRecordingSeconds(0);
     setErrorMessage(null);
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
@@ -583,6 +617,15 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <button type="button" disabled={isBusy || isRecording || isClosing} onClick={() => audioFileInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-md border border-[#D8D2C5] bg-[#FAF8F5] px-4 py-2 text-xs font-semibold text-[#1C1917] hover:bg-[#EAE4D9] disabled:opacity-40 disabled:cursor-not-allowed">
+                  <Upload className="w-3.5 h-3.5" />Upload audio · 上传录音
+                </button>
+                <input ref={audioFileInputRef} type="file" aria-label="上传录音文件" accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/webm,audio/ogg,.wav,.mp3,.m4a,.webm,.ogg" disabled={isBusy || isRecording || isClosing} className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; handleAudioUpload(file); }} />
+                <p className="text-[11px] text-[#78716C]">支持 WAV、MP3、M4A、WebM、OGG，最多 20 MB。{canTranscribe ? '选择后自动转写。' : '配置转写后可点击下方按钮。'}</p>
+                {audioFileName && <p className="mx-auto max-w-sm truncate text-xs text-[#57534E]" title={audioFileName}>已选择：{audioFileName}</p>}
+              </div>
+
               {/* Canvas Waveform */}
               {isRecording && (
                 <div className="w-full flex justify-center py-2">
@@ -598,7 +641,7 @@ export const WakeRecorderModal: React.FC<WakeRecorderModalProps> = ({ isOpen, on
               {/* Playback preview if recorded */}
               {audioUrl && !isRecording && (
                 <div className="flex items-center justify-center gap-3 pt-2">
-                  <audio src={audioUrl} controls className="h-9 max-w-xs" />
+                  <audio src={audioUrl} controls className="h-9 max-w-xs" onLoadedMetadata={(event) => { const player = event.currentTarget; if (audioFileName && player.src === previewUrlRef.current && Number.isFinite(player.duration)) setRecordingSeconds(Math.ceil(player.duration)); }} />
                   <button
                     onClick={() => audioBlob && handleTranscribe(audioBlob)}
                     disabled={isBusy || !canTranscribe}

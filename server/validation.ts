@@ -1,4 +1,4 @@
-import type { ChatMessage, DreamEntry, Interpretation } from '../src/types';
+import type { ChatMessage, DreamEntry, Interpretation } from '../src/types.js';
 
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const AUDIO_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/mp4', 'audio/wav', 'audio/mpeg']);

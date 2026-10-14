@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ChatMessage, DreamEntry } from '../src/types';
-import { parseChatHistory, parseDream } from './validation';
+import type { ChatMessage, DreamEntry } from '../src/types.js';
+import { parseChatHistory, parseDream } from './validation.js';
 
 const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;

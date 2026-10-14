@@ -3,14 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { GoogleGenAI, Type } from '@google/genai';
-import { createDreamStore } from './dreamStore';
-import { parseDream, parseChatHistory, parseInterpretation } from './validation';
-import type { DreamEntry } from '../src/types';
-import { getAiConfig } from './aiConfig';
-import { AiProviderError, deepseekText, dashscopeTranscribe, dashscopeImage } from './domesticAi';
+import { createDreamStore } from './dreamStore.js';
+import { parseDream, parseChatHistory, parseInterpretation } from './validation.js';
+import type { DreamEntry } from '../src/types.js';
+import { getAiConfig } from './aiConfig.js';
+import { AiProviderError, deepseekText, dashscopeTranscribe, dashscopeImage } from './domesticAi.js';
 
-import type { ArchiveRuntime, RequestArchiveContext } from './runtime';
-import { getAiEnvironment } from './aiEnvironment';
+import type { ArchiveRuntime, RequestArchiveContext } from './runtime.js';
+import { getAiEnvironment } from './aiEnvironment.js';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export function createApp(runtime?: ArchiveRuntime) {

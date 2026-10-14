@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { ChatMessage, DreamEntry } from '../src/types';
-import { parseChatHistory, parseDream } from './validation';
+import type { ChatMessage, DreamEntry } from '../src/types.js';
+import { parseChatHistory, parseDream } from './validation.js';
 
 export const CLOUD_MEDIA_BUCKET = 'oneiros-media';
 const MAX_DREAM_BYTES = 1_000_000;

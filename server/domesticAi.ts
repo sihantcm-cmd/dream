@@ -1,6 +1,6 @@
 import { inflateSync } from 'node:zlib';
 import { Agent } from 'undici';
-import { getAiEnvironment, getAiTimeoutMs } from './aiEnvironment';
+import { getAiEnvironment, getAiTimeoutMs } from './aiEnvironment.js';
 
 type Provider = 'deepseek' | 'dashscope';
 

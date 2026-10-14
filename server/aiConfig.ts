@@ -1,5 +1,5 @@
-import { getAiEnvironment, getAiTimeoutMs } from './aiEnvironment';
-import { getDeepseekReasoningEffort, getImageDimensions } from './domesticAi';
+import { getAiEnvironment, getAiTimeoutMs } from './aiEnvironment.js';
+import { getDeepseekReasoningEffort, getImageDimensions } from './domesticAi.js';
 
 // Evaluate after dotenv has loaded the local configuration.
 export function getAiConfig() {

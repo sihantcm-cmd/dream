@@ -94,7 +94,7 @@ sudo install -m 600 .env /var/backups/oneiros/aliyun.env
 docker compose --env-file .env start app
 ```
 
-确认归档命令成功后，再将备份保存到自己控制的另一处位置。备份包含个人梦境与安全配置，不会由应用自动上传。不要丢失 `SETTINGS_ENCRYPTION_KEY`，否则旧 API 设置无法解密，需要重新填写密钥。恢复时先停止应用，在专用卷中恢复，并保留文件原 UID/GID 1000。
+确认归档命令成功后，再将备份保存到自己控制的另一处位置。备份包含个人梦境与安全配置，不会由应用自动上传。不要丢失 `SETTINGS_ENCRYPTION_KEY`，否则旧 API 设置无法解密；应先恢复原加密密钥。如果原密钥确实无法找回，需要管理员备份后清除无法解密的 API 设置，再重新填写模型密钥，网页不能直接覆盖旧密文恢复。恢复时先停止应用，在专用卷中恢复，并保留文件原 UID/GID 1000。
 
 ## 更新
 

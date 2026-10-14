@@ -1,5 +1,5 @@
-import { createAliyunRuntime } from './aliyunRuntime';
-import { createSupabaseRuntime } from './supabaseRuntime';
+import { createAliyunRuntime } from './aliyunRuntime.js';
+import { createSupabaseRuntime } from './supabaseRuntime.js';
 
 export function createCloudRuntime() {
   // Vercel is stateless. A mistaken environment variable must not enable disk storage there.

@@ -1,12 +1,12 @@
 import type express from 'express';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { ArchiveRuntime } from './runtime';
-import { createCloudDreamStore } from './cloudStore';
-import { getAiConfig } from './aiConfig';
-import { runWithAiEnvironment } from './aiEnvironment';
-import { AiProviderError, testProviderConnection } from './domesticAi';
-import { DEFAULT_SETTINGS, publicSettings, settingsEnvironment, updateSettings, type AiSettings } from './settings';
-import { openSettings, sealSettings, validateEncryptionKey } from './secretBox';
+import type { ArchiveRuntime } from './runtime.js';
+import { createCloudDreamStore } from './cloudStore.js';
+import { getAiConfig } from './aiConfig.js';
+import { runWithAiEnvironment } from './aiEnvironment.js';
+import { AiProviderError, testProviderConnection } from './domesticAi.js';
+import { DEFAULT_SETTINGS, publicSettings, settingsEnvironment, updateSettings, type AiSettings } from './settings.js';
+import { openSettings, sealSettings, validateEncryptionKey } from './secretBox.js';
 
 type SettingsRecord = { settings: AiSettings; updatedAt: string | null };
 interface RuntimeOptions {

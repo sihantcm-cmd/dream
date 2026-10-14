@@ -5,12 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(appRoot, '.env') });
-const { createApp } = await import('./server/app');
+const { createApp } = await import('./server/app.js');
 const mode = process.env.ARCHIVE_MODE || 'local';
 if (!['local', 'cloud', 'aliyun', 'supabase'].includes(mode)) throw new Error('ARCHIVE_MODE must be local, aliyun or supabase.');
 const cloud = mode !== 'local' || process.env.VERCEL === '1';
 if (!cloud && process.env.HOST && !['127.0.0.1', 'localhost', '::1'].includes(process.env.HOST)) throw new Error('Public listeners require authenticated aliyun or supabase mode.');
-const runtime = cloud ? (await import('./server/cloudRuntime')).createCloudRuntime() : undefined;
+const runtime = cloud ? (await import('./server/cloudRuntime.js')).createCloudRuntime() : undefined;
 const app = createApp(runtime);
 app.use('/src/assets/images', express.static(path.join(appRoot, 'src/assets/images')));
 app.use('/samples', express.static(path.join(appRoot, 'src/assets/images')));
