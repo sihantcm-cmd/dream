@@ -87,7 +87,8 @@ function readHiddenPassword(prompt) {
       for (const character of chunk) {
         if (character === '\u0003' || character === '\u0004') return finish(new Error('配置已取消，未保存密码。'));
         if (character === '\r' || character === '\n') return finish();
-        if (character === '\u007f' || character === '\b') value = [...value].slice(0, -1).join('');
+        if (character === '\u0015') value = '';
+        else if (character === '\u007f' || character === '\b') value = [...value].slice(0, -1).join('');
         else if (character >= ' ' && value.length < 257) value += character;
       }
     };
@@ -98,6 +99,22 @@ function readHiddenPassword(prompt) {
     input.once('error', failed);
     input.resume();
   });
+}
+
+export async function readConfirmedPassword(readPassword = readHiddenPassword, notify = console.error) {
+  while (true) {
+    const password = await readPassword('网站密码（14–256 个字符，输入不回显；Ctrl+U 清空重输）：');
+    if (password.length < 14 || password.length > 256 || /[\u0000-\u001f\u007f]/.test(password)) {
+      notify('密码需为 14–256 个字符，且不能包含控制字符。请重新输入，尚未保存。');
+      continue;
+    }
+    const confirmation = await readPassword('再次输入网站密码：');
+    if (password !== confirmation) {
+      notify('两次密码不一致，请重新输入，尚未保存。');
+      continue;
+    }
+    return password;
+  }
 }
 
 export async function main() {
@@ -115,9 +132,7 @@ export async function main() {
     host = parsePublicHost(await readline.question('阿里云公网 IPv4 或域名（不带端口）：'));
     username = (await readline.question('网站用户名 [oneiros]：')).trim() || 'oneiros';
   } finally { readline.close(); }
-  const password = await readHiddenPassword('网站密码（14–256 个字符，输入不回显）：');
-  const confirmation = await readHiddenPassword('再次输入网站密码：');
-  if (password !== confirmation) throw new Error('两次密码不一致，未创建配置文件。');
+  const password = await readConfirmedPassword();
   const environment = await buildAliyunEnvironment(host, username, password);
   const destination = path.join(projectDirectory, 'deploy', 'aliyun', '.env');
   await mkdir(path.dirname(destination), { recursive: true });
