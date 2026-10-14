@@ -10,7 +10,6 @@ dist
 build
 coverage
 data
-**/data
 **/.env*
 .env*
 **/*.log
